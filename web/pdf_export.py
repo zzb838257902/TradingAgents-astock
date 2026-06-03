@@ -8,7 +8,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import fpdf as _fpdf_mod
 from fpdf import FPDF
+
+
+# fpdf2 (maintained fork) and the abandoned pyfpdf 1.x BOTH import as `fpdf`, and
+# installing both leaves whichever was installed last on disk. pyfpdf 1.x encodes
+# every page as latin-1, so any Chinese character raises a cryptic
+# `UnicodeEncodeError: 'latin-1' codec can't encode` deep inside the library
+# (issue #54). Detect the wrong library up front and tell the user exactly how to
+# fix it, instead of letting the PDF blow up mid-render.
+_FPDF_VERSION = getattr(_fpdf_mod, "__version__", None) or getattr(_fpdf_mod, "FPDF_VERSION", "0")
+
+
+def _ensure_fpdf2() -> None:
+    try:
+        major = int(str(_FPDF_VERSION).split(".")[0])
+    except (ValueError, IndexError):
+        major = 0
+    if major < 2:
+        raise RuntimeError(
+            f"检测到旧版 fpdf (pyfpdf {_FPDF_VERSION})，它用 latin-1 编码、无法处理中文，"
+            "会导致 PDF 导出崩溃（issue #54）。请执行：\n"
+            '    pip uninstall -y fpdf && pip install "fpdf2>=2.8.0"\n'
+            "（fpdf 与 fpdf2 都以 `fpdf` 名称导入、互相冲突，必须卸载旧的 fpdf），"
+            "或改用「下载 Markdown」导出。"
+        )
 
 
 # Per-OS CJK font candidates. The current OS's fonts are tried first so a
@@ -366,9 +391,11 @@ def _collect_sections(final_state: dict[str, Any]) -> list[tuple[str, str]]:
 def generate_pdf(final_state: dict[str, Any], ticker: str, trade_date: str, signal: str) -> bytes:
     """Generate a PDF report and return it as bytes.
 
-    Raises RuntimeError if no CJK font is available on the system — callers
-    should catch this and fall back to Markdown export.
+    Raises RuntimeError if the wrong fpdf library is installed (issue #54) or no
+    CJK font is available on the system — callers should catch this and fall back
+    to Markdown export.
     """
+    _ensure_fpdf2()
     pdf = _ReportPDF(ticker, trade_date, signal)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
