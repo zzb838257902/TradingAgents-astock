@@ -19,6 +19,7 @@ from tradingagents.market_data.contracts import (
     SecurityRecord,
     TradingDay,
 )
+from tradingagents.market_data.financials import financial_available_at
 from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai
 
 _RATE_LIMIT_PATTERN = re.compile(r"每分钟最多访问")
@@ -127,6 +128,36 @@ def map_daily_bars_frame(frame: pd.DataFrame, source: str) -> list[dict]:
             "amount": amount,
             "pre_close": float(row.get("pre_close", row.get("close", 0.0)) or 0.0),
             "available_at": datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
+            "source": source,
+        })
+    return rows
+
+
+def map_financial_frame(
+    frame: pd.DataFrame,
+    source: str,
+    *,
+    open_dates: list[date] | None = None,
+) -> list[dict]:
+    rows: list[dict] = []
+    for row in frame.to_dict(orient="records"):
+        ann_date = _parse_tushare_date(row.get("ann_date"))
+        if ann_date is None:
+            continue
+        report_period = str(row.get("end_date", ""))
+        rows.append({
+            "symbol": denormalize_ts_code(str(row["ts_code"])),
+            "report_period": report_period,
+            "roe": float(row.get("roe") or 0.0),
+            "operating_cashflow": float(row.get("ocfps") or 0.0),
+            "net_profit": float(row.get("netprofit_yoy") or 0.0),
+            "debt_ratio": float(row.get("debt_to_assets") or 0.0),
+            "announcement_date": ann_date,
+            "actual_announcement_time": None,
+            "available_at": financial_available_at(ann_date, open_dates=open_dates),
+            "update_flag": str(row.get("update_flag")) if row.get("update_flag") is not None else None,
+            "source_version": report_period,
+            "record_type": "indicator",
             "source": source,
         })
     return rows
@@ -372,24 +403,12 @@ class TushareProvider:
                     "fina_indicator",
                     ts_code=normalize_ts_code(symbol),
                 )
-                for row in frame.to_dict(orient="records"):
-                    ann_date = _parse_tushare_date(row.get("ann_date"))
-                    if ann_date is None:
-                        continue
-                    available_at = datetime.combine(ann_date, time(9, 0), tzinfo=SHANGHAI)
-                    if available_at > cutoff:
-                        continue
-                    rows.append({
-                        "symbol": denormalize_ts_code(str(row["ts_code"])),
-                        "report_period": str(row.get("end_date", "")),
-                        "roe": float(row.get("roe") or 0.0),
-                        "operating_cashflow": float(row.get("ocfps") or 0.0),
-                        "net_profit": float(row.get("netprofit_yoy") or 0.0),
-                        "debt_ratio": float(row.get("debt_to_assets") or 0.0),
-                        "available_at": available_at,
-                        "source": self.name,
-                    })
-            return rows
+                rows.extend(map_financial_frame(frame, self.name))
+            visible = [
+                row for row in rows
+                if ensure_aware_shanghai(row["available_at"]) <= cutoff
+            ]
+            return visible
 
         result = self._wrap_call(call)
         if result.data is None:

@@ -140,16 +140,25 @@ def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> N
 
     financials = []
     for row in fixture.get("financials", []):
-        financials.append({
+        item = {
             "symbol": row["symbol"],
             "report_period": row["report_period"],
             "roe": row["roe"],
             "operating_cashflow": row["operating_cashflow"],
             "net_profit": row["net_profit"],
             "debt_ratio": row["debt_ratio"],
-            "available_at": _parse_available_at(row["available_at"]),
             "source": "fixture",
-        })
+            "update_flag": row.get("update_flag"),
+            "source_version": row.get("source_version"),
+            "record_type": row.get("record_type"),
+        }
+        if row.get("announcement_date"):
+            item["announcement_date"] = date.fromisoformat(row["announcement_date"])
+        if row.get("actual_announcement_time"):
+            item["actual_announcement_time"] = _parse_available_at(row["actual_announcement_time"])
+        if row.get("available_at"):
+            item["available_at"] = _parse_available_at(row["available_at"])
+        financials.append(item)
     repo.upsert_financials(financials)
     _load_board_data_from_fixture(repo, fixture)
     _load_auxiliary_from_fixture(repo, fixture)
@@ -207,16 +216,25 @@ def load_fixture_as_published(repo: MarketDataRepository, fixture: dict) -> None
 
     financials = []
     for row in fixture.get("financials", []):
-        financials.append({
+        item = {
             "symbol": row["symbol"],
             "report_period": row["report_period"],
             "roe": row["roe"],
             "operating_cashflow": row["operating_cashflow"],
             "net_profit": row["net_profit"],
             "debt_ratio": row["debt_ratio"],
-            "available_at": _parse_available_at(row["available_at"]),
             "source": "fixture",
-        })
+            "update_flag": row.get("update_flag"),
+            "source_version": row.get("source_version"),
+            "record_type": row.get("record_type"),
+        }
+        if row.get("announcement_date"):
+            item["announcement_date"] = date.fromisoformat(row["announcement_date"])
+        if row.get("actual_announcement_time"):
+            item["actual_announcement_time"] = _parse_available_at(row["actual_announcement_time"])
+        if row.get("available_at"):
+            item["available_at"] = _parse_available_at(row["available_at"])
+        financials.append(item)
     repo.upsert_financials(financials)
     _load_board_data_from_fixture(repo, fixture)
     _load_auxiliary_from_fixture(repo, fixture)

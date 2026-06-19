@@ -17,6 +17,7 @@ from tradingagents.market_data.quality import (
     build_daily_completeness_report,
     build_security_coverage_report,
 )
+from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
 
 DAILY_COMPLETENESS_THRESHOLD = 0.995
@@ -278,6 +279,47 @@ class MarketDataSync:
                     denominator=len(rows) or 1,
                     threshold=0.0,
                     ratio=1.0 if rows else 0.0,
+                ),
+            },
+        )
+
+    def sync_financials(
+        self,
+        as_of: datetime,
+        symbols: list[str] | None = None,
+    ) -> SyncResult:
+        probe = self._require_probe_dataset("financials")
+        if probe is not None:
+            return probe
+        target_symbols = symbols
+        if not target_symbols:
+            target_symbols = self.repository.list_effective_symbols(as_of.date(), as_of)
+        fetched = self.provider.get_financials(target_symbols, as_of)
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result("financials", fetched)
+        rows = fetched.data or []
+        open_dates = self.repository.list_open_trade_dates()
+        normalized = [
+            normalize_financial_row(row, open_dates=open_dates or None)
+            for row in rows
+        ]
+        self.repository.upsert_financials(normalized)
+        self._save_snapshot(
+            "fina_indicator",
+            {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
+            normalized,
+        )
+        return SyncResult(
+            dataset="financials",
+            status=SyncStatus.PUBLISHED,
+            coverage_reports={
+                "financial_records": CoverageReport(
+                    dataset="financials",
+                    status="pass",
+                    numerator=len(normalized),
+                    denominator=len(normalized) or 1,
+                    threshold=0.0,
+                    ratio=1.0 if normalized else 0.0,
                 ),
             },
         )

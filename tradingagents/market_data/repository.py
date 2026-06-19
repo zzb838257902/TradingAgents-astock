@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 from tradingagents.market_data.contracts import SecurityRecord
+from tradingagents.market_data.financials import normalize_financial_row, pick_latest_visible_financials
 from tradingagents.market_data.migrations import apply_migrations
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -26,7 +27,8 @@ _DAILY_BAR_COLUMNS = (
 )
 _FINANCIAL_COLUMNS = (
     "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
-    "debt_ratio", "available_at", "source",
+    "debt_ratio", "announcement_date", "actual_announcement_time", "available_at",
+    "update_flag", "source_version", "record_type", "source",
 )
 
 
@@ -178,27 +180,45 @@ class MarketDataRepository:
         return [dict(zip(columns, row)) for row in rows]
 
     def upsert_financials(self, rows: Iterable[dict]) -> None:
-        values = [
-            (
-                row["symbol"],
-                row["report_period"],
-                row["roe"],
-                row["operating_cashflow"],
-                row["net_profit"],
-                row["debt_ratio"],
-                row["available_at"],
-                row["source"],
-            )
-            for row in rows
-        ]
+        open_dates = self.list_open_trade_dates()
+        values = []
+        for row in rows:
+            normalized = normalize_financial_row(row, open_dates=open_dates)
+            values.append((
+                normalized["symbol"],
+                normalized["report_period"],
+                normalized["roe"],
+                normalized["operating_cashflow"],
+                normalized["net_profit"],
+                normalized["debt_ratio"],
+                normalized["announcement_date"],
+                normalized["actual_announcement_time"],
+                normalized["available_at"],
+                normalized["update_flag"],
+                normalized["source_version"],
+                normalized["record_type"],
+                normalized["source"],
+                normalized.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                normalized.get("dataset_version_id"),
+            ))
         if not values:
             return
-        placeholders = ", ".join("?" for _ in _FINANCIAL_COLUMNS)
+        placeholders = ", ".join("?" for _ in range(15))
         self.connection.executemany(
-            f"INSERT OR REPLACE INTO financials ({', '.join(_FINANCIAL_COLUMNS)}) "
-            f"VALUES ({placeholders})",
+            f"""INSERT OR REPLACE INTO financials
+               ({', '.join(_FINANCIAL_COLUMNS)}, ingested_at, dataset_version_id)
+               VALUES ({placeholders})""",
             values,
         )
+
+    def list_open_trade_dates(self) -> list[date]:
+        rows = self.connection.execute(
+            """SELECT trade_date
+               FROM trade_calendar
+               WHERE is_open = TRUE
+               ORDER BY trade_date"""
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def get_financials(
         self, symbols: list[str], available_before: datetime
@@ -208,26 +228,25 @@ class MarketDataRepository:
         placeholders = ", ".join("?" for _ in symbols)
         query = f"""
             SELECT f.symbol, f.report_period, f.roe, f.operating_cashflow,
-                   f.net_profit, f.debt_ratio, f.available_at, f.source
+                   f.net_profit, f.debt_ratio, f.announcement_date,
+                   f.actual_announcement_time, f.available_at, f.update_flag,
+                   f.source_version, f.record_type, f.source
             FROM financials f
             LEFT JOIN dataset_versions v ON f.dataset_version_id = v.version_id
             WHERE f.symbol IN ({placeholders})
               AND f.available_at <= ?
               AND (f.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
-            ORDER BY f.symbol, f.available_at DESC
+            ORDER BY f.symbol, f.report_period, f.available_at
         """
         params = [*symbols, available_before]
         columns = [
             "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
-            "debt_ratio", "available_at", "source",
+            "debt_ratio", "announcement_date", "actual_announcement_time",
+            "available_at", "update_flag", "source_version", "record_type", "source",
         ]
         rows = self.connection.execute(query, params).fetchall()
-        latest: dict[str, dict] = {}
-        for row in rows:
-            record = dict(zip(columns, row))
-            if record["symbol"] not in latest:
-                latest[record["symbol"]] = record
-        return list(latest.values())
+        records = [dict(zip(columns, row)) for row in rows]
+        return pick_latest_visible_financials(records)
 
     def begin_ingestion_run(self, dataset: str, params: dict[str, Any]) -> str:
         run_id = str(uuid.uuid4())

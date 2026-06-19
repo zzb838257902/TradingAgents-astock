@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -279,6 +279,50 @@ def _migration_steps() -> list[tuple[int, str]]:
                 value_json VARCHAR NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             );
+        """),
+        (6, """
+            CREATE TABLE financials_v6 (
+                symbol VARCHAR NOT NULL,
+                report_period VARCHAR NOT NULL,
+                roe DOUBLE NOT NULL,
+                operating_cashflow DOUBLE NOT NULL,
+                net_profit DOUBLE NOT NULL,
+                debt_ratio DOUBLE NOT NULL,
+                announcement_date DATE NOT NULL,
+                actual_announcement_time TIMESTAMPTZ,
+                available_at TIMESTAMPTZ NOT NULL,
+                update_flag VARCHAR,
+                source_version VARCHAR,
+                record_type VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(symbol, report_period, announcement_date, source, record_type)
+            );
+            INSERT INTO financials_v6 (
+                symbol, report_period, roe, operating_cashflow, net_profit, debt_ratio,
+                announcement_date, actual_announcement_time, available_at, update_flag,
+                source_version, record_type, source, ingested_at, dataset_version_id
+            )
+            SELECT
+                symbol,
+                report_period,
+                roe,
+                operating_cashflow,
+                net_profit,
+                debt_ratio,
+                COALESCE(announcement_date, CAST(available_at AS DATE)),
+                actual_announcement_time,
+                available_at,
+                update_flag,
+                source_version,
+                COALESCE(record_type, 'indicator'),
+                source,
+                ingested_at,
+                dataset_version_id
+            FROM financials;
+            DROP TABLE financials;
+            ALTER TABLE financials_v6 RENAME TO financials;
         """),
     ]
 

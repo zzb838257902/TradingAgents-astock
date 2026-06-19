@@ -84,6 +84,10 @@ def sync_dataset(
             )
         signal_time = datetime.fromisoformat(as_of)
         result = sync.sync_board_memberships(board_type, board_code, signal_time)
+    elif dataset == "financials":
+        if not as_of:
+            raise typer.BadParameter("financials requires --as-of")
+        result = sync.sync_financials(datetime.fromisoformat(as_of))
     else:
         raise typer.BadParameter(f"unsupported dataset: {dataset}")
     typer.echo(json.dumps({
