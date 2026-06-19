@@ -79,7 +79,7 @@ class BacktestEngine:
                 )
                 pending_targets = None
 
-            held_symbols = [s for s, ls in lots.items() if sum(l.shares for l in ls) > 0]
+            held_symbols = [s for s, ls in lots.items() if sum(lot.shares for lot in ls) > 0]
             for symbol in held_symbols:
                 if symbol not in day_bars:
                     raise ValueError(f"missing bar for held symbol {symbol}")
