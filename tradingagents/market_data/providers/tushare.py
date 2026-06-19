@@ -124,6 +124,7 @@ def map_daily_bars_frame(frame: pd.DataFrame, source: str) -> list[dict]:
             "close": float(row["close"]),
             "volume": volume,
             "amount": amount,
+            "pre_close": float(row.get("pre_close", row.get("close", 0.0)) or 0.0),
             "available_at": datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
             "source": source,
         })
@@ -265,6 +266,20 @@ class TushareProvider:
                 )
                 rows.extend(map_daily_bars_frame(frame, self.name))
             return rows
+
+        result = self._wrap_call(call)
+        if result.data is None:
+            return result
+        rows = result.data
+        return result.model_copy(update={
+            "data": rows,
+            "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
+        })
+
+    def get_daily_by_trade_date(self, trade_date: date) -> DataResult[list[dict]]:
+        def call() -> list[dict]:
+            frame = self._query("daily", trade_date=trade_date.strftime("%Y%m%d"))
+            return map_daily_bars_frame(frame, self.name)
 
         result = self._wrap_call(call)
         if result.data is None:

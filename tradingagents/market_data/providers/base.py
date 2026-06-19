@@ -24,6 +24,9 @@ class MarketDataProvider(Protocol):
     ) -> DataResult[list[dict]]:
         ...
 
+    def get_daily_by_trade_date(self, trade_date: date) -> DataResult[list[dict]]:
+        ...
+
     def get_daily_indicators(self, trade_date: date) -> DataResult[list[dict]]:
         ...
 

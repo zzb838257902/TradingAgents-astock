@@ -83,6 +83,9 @@ class ExistingAStockProvider:
     def get_trade_calendar(self, start: date, end: date) -> DataResult[list[TradingDay]]:
         return _not_implemented("get_trade_calendar")
 
+    def get_daily_by_trade_date(self, trade_date: date) -> DataResult[list[dict]]:
+        return _not_implemented("get_daily_by_trade_date")
+
     def get_daily_bars(
         self, symbols: Sequence[str], start: date, end: date
     ) -> DataResult[list[dict]]:

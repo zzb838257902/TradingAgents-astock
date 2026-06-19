@@ -92,12 +92,14 @@ class MarketDataRepository:
         self, as_of: date, available_before: datetime
     ) -> list[SecurityRecord]:
         rows = self.connection.execute(
-            """SELECT symbol, name, board, valid_from, valid_to, list_date,
-                      delist_date, status, st_flag, available_at, source
-               FROM securities
-               WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
-                 AND available_at <= ?
-               ORDER BY symbol""",
+            """SELECT s.symbol, s.name, s.board, s.valid_from, s.valid_to, s.list_date,
+                      s.delist_date, s.status, s.st_flag, s.available_at, s.source
+               FROM securities s
+               LEFT JOIN dataset_versions v ON s.dataset_version_id = v.version_id
+               WHERE s.valid_from <= ? AND (s.valid_to IS NULL OR s.valid_to > ?)
+                 AND s.available_at <= ?
+                 AND (s.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+               ORDER BY s.symbol""",
             [as_of, as_of, available_before],
         ).fetchall()
         return [
@@ -238,6 +240,59 @@ class MarketDataRepository:
         )
         return run_id
 
+    def upsert_staging_securities(self, run_id: str, records: Iterable[SecurityRecord]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        rows = [
+            (
+                run_id,
+                record.symbol,
+                record.name,
+                record.board,
+                record.valid_from,
+                record.valid_to,
+                record.list_date,
+                record.delist_date,
+                record.status,
+                record.st_flag,
+                record.available_at,
+                record.source,
+                now,
+            )
+            for record in records
+        ]
+        if not rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_securities
+               (run_id, symbol, name, board, valid_from, valid_to, list_date,
+                delist_date, status, st_flag, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
+    def upsert_staging_trade_calendar(self, run_id: str, days: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        rows = [
+            (
+                run_id,
+                day["exchange"],
+                day["trade_date"],
+                day["is_open"],
+                day["available_at"],
+                day["source"],
+                now,
+            )
+            for day in days
+        ]
+        if not rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_trade_calendar
+               (run_id, exchange, trade_date, is_open, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
     def upsert_staging_daily_bars(self, run_id: str, bars: Iterable[dict]) -> None:
         now = datetime.now(tz=SHANGHAI)
         rows = [
@@ -268,6 +323,25 @@ class MarketDataRepository:
             rows,
         )
 
+    def find_published_version_by_hash(
+        self, dataset: str, content_hash: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """SELECT version_id, dataset, status, published_at, ingestion_run_id, content_hash
+               FROM dataset_versions
+               WHERE dataset = ? AND content_hash = ? AND status = 'PUBLISHED'
+               ORDER BY published_at DESC
+               LIMIT 1""",
+            [dataset, content_hash],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [
+            "version_id", "dataset", "status", "published_at",
+            "ingestion_run_id", "content_hash",
+        ]
+        return dict(zip(columns, row))
+
     def publish_dataset_version(self, run_id: str) -> str:
         run = self.connection.execute(
             "SELECT dataset FROM ingestion_runs WHERE run_id = ?",
@@ -276,35 +350,36 @@ class MarketDataRepository:
         if run is None:
             raise ValueError(f"unknown ingestion run {run_id}")
         dataset = run[0]
+        content_hash = self._staging_content_hash(run_id, dataset)
+        existing = self.find_published_version_by_hash(dataset, content_hash)
+        if existing is not None:
+            now = datetime.now(tz=SHANGHAI)
+            self.connection.execute(
+                """UPDATE ingestion_runs
+                   SET status = 'PUBLISHED', finished_at = ?, error_summary = NULL
+                   WHERE run_id = ?""",
+                [now, run_id],
+            )
+            self._clear_staging_for_run(run_id)
+            return existing["version_id"]
+
         version_id = str(uuid.uuid4())
         now = datetime.now(tz=SHANGHAI)
-        staging_rows = self.connection.execute(
-            """SELECT symbol, trade_date, open, high, low, close, volume, amount,
-                      prev_close, available_at, source, ingested_at
-               FROM staging_daily_bars WHERE run_id = ?""",
-            [run_id],
-        ).fetchall()
-        content_hash = _hash_payload([list(row) for row in staging_rows])
         self.connection.execute(
             """INSERT INTO dataset_versions
                (version_id, dataset, status, published_at, ingestion_run_id, content_hash)
                VALUES (?, ?, 'STAGING', NULL, ?, ?)""",
             [version_id, dataset, run_id, content_hash],
         )
-        if staging_rows:
-            self.connection.executemany(
-                """INSERT OR REPLACE INTO daily_bars
-                   (symbol, trade_date, open, high, low, close, volume, amount,
-                    available_at, source, prev_close, ingested_at, dataset_version_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    (
-                        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
-                        row[9], row[10], row[8], row[11], version_id,
-                    )
-                    for row in staging_rows
-                ],
-            )
+        if dataset == "daily_bars":
+            self._copy_staging_daily_bars(run_id, version_id)
+        elif dataset == "security_master":
+            self._copy_staging_securities(run_id, version_id)
+        elif dataset == "trade_calendar":
+            self._copy_staging_trade_calendar(run_id, version_id)
+        else:
+            raise ValueError(f"unsupported dataset for publish: {dataset}")
+
         self.connection.execute(
             """UPDATE dataset_versions
                SET status = 'PUBLISHED', published_at = ?
@@ -317,8 +392,103 @@ class MarketDataRepository:
                WHERE run_id = ?""",
             [now, run_id],
         )
-        self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
+        self._clear_staging_for_run(run_id)
         return version_id
+
+    def _staging_content_hash(self, run_id: str, dataset: str) -> str:
+        if dataset == "daily_bars":
+            rows = self.connection.execute(
+                """SELECT symbol, trade_date, open, high, low, close, volume, amount,
+                          prev_close, available_at, source
+                   FROM staging_daily_bars WHERE run_id = ?
+                   ORDER BY symbol, trade_date""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "security_master":
+            rows = self.connection.execute(
+                """SELECT symbol, name, board, valid_from, valid_to, list_date,
+                          delist_date, status, st_flag, available_at, source
+                   FROM staging_securities WHERE run_id = ?
+                   ORDER BY symbol, valid_from""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "trade_calendar":
+            rows = self.connection.execute(
+                """SELECT exchange, trade_date, is_open, available_at, source
+                   FROM staging_trade_calendar WHERE run_id = ?
+                   ORDER BY exchange, trade_date""",
+                [run_id],
+            ).fetchall()
+        else:
+            rows = []
+        return _hash_payload([list(row) for row in rows])
+
+    def _copy_staging_daily_bars(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT symbol, trade_date, open, high, low, close, volume, amount,
+                      prev_close, available_at, source, ingested_at
+               FROM staging_daily_bars WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO daily_bars
+               (symbol, trade_date, open, high, low, close, volume, amount,
+                available_at, source, prev_close, ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+                    row[9], row[10], row[8], row[11], version_id,
+                )
+                for row in staging_rows
+            ],
+        )
+
+    def _copy_staging_securities(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT symbol, name, board, valid_from, valid_to, list_date,
+                      delist_date, status, st_flag, available_at, source, ingested_at
+               FROM staging_securities WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO securities
+               (symbol, name, board, valid_from, valid_to, list_date,
+                delist_date, status, st_flag, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:11], row[11], version_id) for row in staging_rows],
+        )
+
+    def _copy_staging_trade_calendar(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT exchange, trade_date, is_open, available_at, source, ingested_at
+               FROM staging_trade_calendar WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO trade_calendar
+               (exchange, trade_date, is_open, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (row[0], row[1], row[2], row[3], row[4], row[5], version_id)
+                for row in staging_rows
+            ],
+        )
+
+    def _clear_staging_for_run(self, run_id: str) -> None:
+        self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
+        self.connection.execute("DELETE FROM staging_securities WHERE run_id = ?", [run_id])
+        self.connection.execute(
+            "DELETE FROM staging_trade_calendar WHERE run_id = ?", [run_id]
+        )
 
     def mark_ingestion_failed(self, run_id: str, error_summary: str) -> None:
         now = datetime.now(tz=SHANGHAI)
@@ -334,7 +504,91 @@ class MarketDataRepository:
                WHERE ingestion_run_id = ? AND status = 'STAGING'""",
             [run_id],
         )
-        self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
+        self._clear_staging_for_run(run_id)
+
+    def get_trade_calendar(
+        self,
+        exchange: str,
+        start: date,
+        end: date,
+        available_before: datetime,
+    ) -> list[dict]:
+        rows = self.connection.execute(
+            """SELECT t.exchange, t.trade_date, t.is_open, t.available_at, t.source
+               FROM trade_calendar t
+               LEFT JOIN dataset_versions v ON t.dataset_version_id = v.version_id
+               WHERE t.exchange = ?
+                 AND t.trade_date >= ?
+                 AND t.trade_date <= ?
+                 AND t.available_at <= ?
+                 AND (t.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+               ORDER BY t.trade_date""",
+            [exchange, start, end, available_before],
+        ).fetchall()
+        columns = ["exchange", "trade_date", "is_open", "available_at", "source"]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def count_effective_securities(self, as_of: date, available_before: datetime) -> int:
+        return len(self.get_effective_securities(as_of, available_before))
+
+    def count_published_daily_symbols(self, trade_date: date) -> int:
+        row = self.connection.execute(
+            """SELECT COUNT(DISTINCT b.symbol)
+               FROM daily_bars b
+               LEFT JOIN dataset_versions v ON b.dataset_version_id = v.version_id
+               WHERE b.trade_date = ?
+                 AND (b.dataset_version_id IS NULL OR v.status = 'PUBLISHED')""",
+            [trade_date],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def record_quality_event(
+        self,
+        dataset: str,
+        rule: str,
+        severity: str,
+        version_id: str | None = None,
+        numerator: float | None = None,
+        denominator: float | None = None,
+        detail_json: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO data_quality_events
+               (event_id, dataset, version_id, rule, severity,
+                numerator, denominator, detail_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                str(uuid.uuid4()),
+                dataset,
+                version_id,
+                rule,
+                severity,
+                numerator,
+                denominator,
+                json.dumps(detail_json or {}, ensure_ascii=False),
+                datetime.now(tz=SHANGHAI),
+            ],
+        )
+
+    def save_sync_state(self, key: str, payload: dict[str, Any]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        self.connection.execute(
+            """INSERT OR REPLACE INTO sync_state(state_key, value_json, updated_at)
+               VALUES (?, ?, ?)""",
+            [key, json.dumps(payload, ensure_ascii=False, default=str), now],
+        )
+
+    def get_sync_state(self, key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT value_json FROM sync_state WHERE state_key = ?",
+            [key],
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    def get_capability_probe(self) -> dict[str, Any] | None:
+        return self.get_sync_state("capability_probe")
 
     def get_latest_published_version(self, dataset: str) -> dict[str, Any] | None:
         row = self.connection.execute(

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -245,6 +245,39 @@ def _migration_steps() -> list[tuple[int, str]]:
                 ingested_at TIMESTAMPTZ,
                 dataset_version_id VARCHAR,
                 PRIMARY KEY(board_type, board_code, symbol, effective_from, source)
+            );
+        """),
+        (5, """
+            CREATE TABLE IF NOT EXISTS staging_securities (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                board VARCHAR NOT NULL,
+                valid_from DATE NOT NULL,
+                valid_to DATE,
+                list_date DATE NOT NULL,
+                delist_date DATE,
+                status VARCHAR NOT NULL,
+                st_flag BOOLEAN NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, symbol, valid_from)
+            );
+            CREATE TABLE IF NOT EXISTS staging_trade_calendar (
+                run_id VARCHAR NOT NULL,
+                exchange VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                is_open BOOLEAN NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, exchange, trade_date, source)
+            );
+            CREATE TABLE IF NOT EXISTS sync_state (
+                state_key VARCHAR PRIMARY KEY,
+                value_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
             );
         """),
     ]

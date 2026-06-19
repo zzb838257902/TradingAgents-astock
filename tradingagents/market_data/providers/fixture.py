@@ -144,6 +144,13 @@ class FixtureProvider:
             pit_level=PITLevel.PIT_REQUIRED,
         )
 
+    def get_daily_by_trade_date(self, trade_date: date) -> DataResult[list[dict]]:
+        return self.get_daily_bars(
+            [item["symbol"] for item in self._fixture["symbols"]],
+            trade_date,
+            trade_date,
+        )
+
     def get_daily_indicators(self, trade_date: date) -> DataResult[list[dict]]:
         run_time = datetime.now(tz=SHANGHAI)
         return DataResult(
