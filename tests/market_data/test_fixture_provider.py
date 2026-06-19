@@ -63,6 +63,21 @@ def test_fixture_provider_industry_members():
     assert result.data[0].symbol == "600001"
 
 
+def test_fixture_provider_concept_members_use_trade_date_snapshot():
+    provider = FixtureProvider(_load_fixture())
+    on_day = provider.get_concept_members(
+        "BK1184.DC",
+        datetime(2026, 1, 2, 15, 30, tzinfo=SHANGHAI),
+    )
+    other_day = provider.get_concept_members(
+        "BK1184.DC",
+        datetime(2026, 1, 3, 15, 30, tzinfo=SHANGHAI),
+    )
+    assert on_day.status == DataStatus.OK
+    assert [item.symbol for item in on_day.data or []] == ["600001"]
+    assert other_day.status == DataStatus.SUCCESS_EMPTY
+
+
 def test_fixture_provider_probe_capabilities_offline():
     provider = FixtureProvider(_load_fixture())
     result = provider.probe_capabilities()

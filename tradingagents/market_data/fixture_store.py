@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from tradingagents.backtest.limits import compute_limit_prices
 from tradingagents.market_data.contracts import SecurityRecord
@@ -181,7 +181,7 @@ def _load_board_data_from_fixture(repo: MarketDataRepository, fixture: dict) -> 
 
     memberships = []
     for item in fixture.get("board_memberships", []):
-        memberships.append({
+        row = {
             "board_type": item["board_type"],
             "board_code": item["board_code"],
             "symbol": item["symbol"],
@@ -200,7 +200,12 @@ def _load_board_data_from_fixture(repo: MarketDataRepository, fixture: dict) -> 
             ),
             "available_at": _parse_available_at(item["available_at"]),
             "source": "fixture",
-        })
+        }
+        if item.get("membership_mode") == "dated_snapshot" and row["snapshot_date"]:
+            row["effective_from"] = row["snapshot_date"]
+            if row["effective_to"] is None:
+                row["effective_to"] = row["snapshot_date"] + timedelta(days=1)
+        memberships.append(row)
     repo.upsert_board_memberships(memberships)
 
 

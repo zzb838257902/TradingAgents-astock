@@ -1036,7 +1036,7 @@ class MarketDataRepository:
             )
             for row in rows
         ]
-        return [item for item in memberships if item.was_member_on(as_of)]
+        return [item for item in memberships if item.pit_member_on(as_of)]
 
     def list_quality_events(self, dataset: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(

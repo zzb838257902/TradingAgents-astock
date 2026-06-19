@@ -206,6 +206,28 @@ def map_index_members_frame(
     return rows
 
 
+def map_concept_members_frame(
+    frame: pd.DataFrame, board_code: str, source: str
+) -> list[Membership]:
+    rows: list[Membership] = []
+    for row in frame.to_dict(orient="records"):
+        trade_date = _parse_tushare_date(row.get("trade_date"))
+        if trade_date is None:
+            continue
+        rows.append(Membership(
+            board_type="concept",
+            board_code=board_code,
+            symbol=denormalize_ts_code(str(row["con_code"])),
+            membership_mode=MembershipMode.DATED_SNAPSHOT,
+            effective_from=trade_date,
+            effective_to=trade_date + timedelta(days=1),
+            snapshot_date=trade_date,
+            available_at=datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
+            source=source,
+        ))
+    return rows
+
+
 def classify_tushare_error(exc: Exception) -> DataStatus:
     message = str(exc)
     if _RATE_LIMIT_PATTERN.search(message):
@@ -442,16 +464,27 @@ class TushareProvider:
     def get_concept_members(
         self, code: str, as_of: datetime
     ) -> DataResult[list[Membership]]:
-        return DataResult(
-            data=None,
-            status=DataStatus.NOT_AVAILABLE_YET,
-            source=self.name,
-            as_of=ensure_aware_shanghai(as_of),
-            available_at=ensure_aware_shanghai(as_of),
-            run_time=datetime.now(tz=SHANGHAI),
-            pit_level=PITLevel.PIT_REQUIRED,
-            errors=["concept members sync not implemented in provider task 4.1"],
-        )
+        as_of = ensure_aware_shanghai(as_of)
+
+        def call() -> list[Membership]:
+            frame = self._query(
+                "dc_member",
+                ts_code=code,
+                trade_date=as_of.strftime("%Y%m%d"),
+            )
+            return map_concept_members_frame(frame, code, self.name)
+
+        result = self._wrap_call(call)
+        if result.data is None:
+            return result
+        rows = result.data
+        return result.model_copy(update={
+            "data": rows,
+            "as_of": as_of,
+            "available_at": as_of,
+            "pit_level": PITLevel.PIT_REQUIRED,
+            "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
+        })
 
     def get_index_members(self, code: str, as_of: datetime) -> DataResult[list[Membership]]:
         as_of = ensure_aware_shanghai(as_of)

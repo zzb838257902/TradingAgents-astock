@@ -90,6 +90,20 @@ def test_membership_requires_mode():
     assert membership.was_member_on(date(2026, 1, 2))
 
 
+def test_dated_snapshot_pit_member_on_matches_trade_date_only():
+    membership = Membership(
+        board_type="concept",
+        board_code="BK1184.DC",
+        symbol="600001",
+        membership_mode=MembershipMode.DATED_SNAPSHOT,
+        snapshot_date=date(2026, 1, 2),
+        available_at=datetime(2026, 1, 2, 15, 30, tzinfo=SHANGHAI),
+        source="fixture",
+    )
+    assert membership.pit_member_on(date(2026, 1, 2))
+    assert not membership.pit_member_on(date(2026, 1, 3))
+
+
 def test_provider_capability_records_probe_fields():
     cap = ProviderCapability(
         dataset="daily_bars",

@@ -123,6 +123,12 @@ class Membership(BaseModel):
             return False
         return True
 
+    def pit_member_on(self, value: date) -> bool:
+        """Strict point-in-time membership for screening (dc_member daily snapshots)."""
+        if self.membership_mode == MembershipMode.DATED_SNAPSHOT:
+            return self.snapshot_date == value if self.snapshot_date else False
+        return self.was_member_on(value)
+
 
 class ProviderCapability(BaseModel):
     model_config = ConfigDict(extra="forbid")

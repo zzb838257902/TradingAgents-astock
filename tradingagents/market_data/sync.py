@@ -223,7 +223,18 @@ class MarketDataSync:
         *,
         board_name: str | None = None,
     ) -> SyncResult:
-        dataset = "industry_members" if board_type == "industry" else "index_members"
+        dataset_by_type = {
+            "industry": "industry_members",
+            "index": "index_members",
+            "concept": "concept_members",
+        }
+        dataset = dataset_by_type.get(board_type)
+        if dataset is None:
+            return SyncResult(
+                dataset="memberships",
+                status=SyncStatus.ERROR,
+                errors=[f"unsupported board_type {board_type}"],
+            )
         probe = self._require_probe_dataset(dataset)
         if probe is not None:
             return probe
@@ -231,6 +242,8 @@ class MarketDataSync:
             fetched = self.provider.get_industry_members(board_code, as_of)
         elif board_type == "index":
             fetched = self.provider.get_index_members(board_code, as_of)
+        elif board_type == "concept":
+            fetched = self.provider.get_concept_members(board_code, as_of)
         else:
             return SyncResult(
                 dataset=dataset,

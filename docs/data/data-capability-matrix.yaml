@@ -25,11 +25,12 @@ datasets:
     available_at: disclosure_time
     pit_level: pit_required
   concept_members:
-    source: eastmoney+baidu
-    history_start: current_snapshot_only
+    source: tushare-dc_member
+    history_start: "2020-01-01 when permitted"
     update_frequency: daily
-    available_at: ingestion_time
-    pit_level: current_only
+    available_at: trade_date_post_close
+    pit_level: pit_required
+    license_note: "Requires Tushare dc_member permission; CURRENT_ONLY fallbacks must not enter historical backtest"
   fund_flow:
     source: eastmoney
     history_start: limited_recent_history

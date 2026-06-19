@@ -118,3 +118,38 @@ def test_industry_universe_limits_ranking(tmp_path):
     )
     assert all_result["ranking"] == ["600001", "600002", "600003"]
     assert industry_result["ranking"] == ["600001", "600002"]
+
+
+def test_concept_universe_limits_ranking(tmp_path):
+    fixture = _universe_fixture()
+    fixture["board_definitions"] = [
+        {"board_type": "concept", "board_code": "BK1184.DC", "name": "测试概念", "pit_level": "pit_required"},
+    ]
+    fixture["board_memberships"] = [
+        {
+            "board_type": "concept",
+            "board_code": "BK1184.DC",
+            "symbol": "600001",
+            "membership_mode": "dated_snapshot",
+            "snapshot_date": "2026-01-03",
+            "available_at": "2026-01-03T15:30:00+08:00",
+        },
+    ]
+    base = ScreenerConfig()
+    config = base.model_copy(update={
+        "universe": base.universe.model_copy(update={
+            "min_listing_days": 2,
+            "min_avg_amount_20d": 1_000_000,
+        }),
+    })
+    result = run_fixture_backtest(
+        fixture,
+        config,
+        tmp_path / "concept.duckdb",
+        universe_request=UniverseRequest(
+            universe_type=UniverseType.CONCEPT,
+            universe_code="BK1184.DC",
+            as_of=datetime(2026, 1, 6, 15, 30, tzinfo=SHANGHAI),
+        ),
+    )
+    assert result["ranking"] == ["600001"]

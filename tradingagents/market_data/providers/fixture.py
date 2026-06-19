@@ -208,6 +208,7 @@ class FixtureProvider:
         as_of: datetime,
     ) -> list[Membership]:
         cutoff = ensure_aware_shanghai(as_of)
+        as_of_date = cutoff.date()
         rows: list[Membership] = []
         for item in self._fixture.get("board_memberships", []):
             if item["board_type"] != board_type or item["board_code"] != code:
@@ -215,7 +216,7 @@ class FixtureProvider:
             available_at = _parse_available_at(item["available_at"])
             if available_at > cutoff:
                 continue
-            rows.append(Membership(
+            membership = Membership(
                 board_type=item["board_type"],
                 board_code=item["board_code"],
                 symbol=item["symbol"],
@@ -231,7 +232,9 @@ class FixtureProvider:
                 ),
                 available_at=available_at,
                 source=self.name,
-            ))
+            )
+            if membership.pit_member_on(as_of_date):
+                rows.append(membership)
         return rows
 
     def get_industry_members(
@@ -290,6 +293,21 @@ class FixtureProvider:
                 capabilities.append(ProviderCapability(
                     dataset="trade_calendar",
                     endpoint="trade_cal",
+                    permitted=True,
+                    pit_level=PITLevel.PIT_REQUIRED,
+                    probed_at=run_time,
+                ))
+        board_types = {item.get("board_type") for item in self._fixture.get("board_memberships", [])}
+        board_probe = {
+            "industry": ("industry_members", "index_member_all"),
+            "concept": ("concept_members", "dc_member"),
+            "index": ("index_members", "index_weight"),
+        }
+        for board_type, (dataset, endpoint) in board_probe.items():
+            if board_type in board_types:
+                capabilities.append(ProviderCapability(
+                    dataset=dataset,
+                    endpoint=endpoint,
                     permitted=True,
                     pit_level=PITLevel.PIT_REQUIRED,
                     probed_at=run_time,
