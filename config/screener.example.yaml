@@ -1,0 +1,13 @@
+home_dir: /tmp/tradingagents-test
+universe:
+  min_listing_days: 60
+  min_avg_amount_20d: 50000000
+strategy:
+  momentum_weight: 0.5
+  quality_weight: 0.5
+portfolio:
+  portfolio_value: 1000000
+  max_positions: 10
+  max_stock_weight: 0.10
+  max_industry_weight: 0.25
+  cash_buffer: 0.10
