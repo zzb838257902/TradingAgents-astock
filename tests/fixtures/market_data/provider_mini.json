@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "datasets": {
+    "daily_bars": "pit_required",
+    "financials": "pit_required"
+  },
+  "symbols": [
+    {"symbol": "600001", "industry": "电子", "st_flag": false, "list_date": "2025-12-31"},
+    {"symbol": "600002", "industry": "银行", "st_flag": false, "list_date": "2025-12-31"}
+  ],
+  "bars": {
+    "2026-01-02": {
+      "600001": {"open": 10, "high": 10.5, "low": 9.8, "close": 10.2, "volume": 2000000},
+      "600002": {"open": 20, "high": 20.5, "low": 19.8, "close": 20.1, "volume": 1500000}
+    },
+    "2026-01-03": {
+      "600001": {"open": 10.1, "high": 10.6, "low": 9.9, "close": 10.3, "volume": 2100000},
+      "600002": {"open": 20.1, "high": 20.6, "low": 19.9, "close": 20.2, "volume": 1600000}
+    }
+  },
+  "financials": [
+    {
+      "symbol": "600001",
+      "report_period": "2025-09-30",
+      "available_at": "2025-10-29T20:00:00+08:00",
+      "roe": 0.15,
+      "operating_cashflow": 120,
+      "net_profit": 100,
+      "debt_ratio": 0.35
+    }
+  ],
+  "trade_calendar": [
+    {"exchange": "SSE", "trade_date": "2026-01-02", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2026-01-03", "is_open": true}
+  ],
+  "board_definitions": [
+    {"board_type": "industry", "board_code": "801080.SI", "name": "电子", "pit_level": "pit_required"}
+  ],
+  "board_memberships": [
+    {
+      "board_type": "industry",
+      "board_code": "801080.SI",
+      "symbol": "600001",
+      "membership_mode": "effective_interval",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "snapshot_date": null,
+      "available_at": "2025-01-01T09:00:00+08:00"
+    }
+  ]
+}

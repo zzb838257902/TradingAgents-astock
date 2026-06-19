@@ -1,15 +1,36 @@
-from datetime import date
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time
 from typing import Sequence
 
 from tradingagents.dataflows.a_stock import get_stock_data
-from tradingagents.market_data.contracts import DataResult, DataStatus, PITLevel
+from tradingagents.market_data.contracts import (
+    DataResult,
+    DataStatus,
+    Membership,
+    PITLevel,
+    ProviderCapability,
+    SecurityRecord,
+    TradingDay,
+)
+from tradingagents.market_data.market_hours import SHANGHAI
 
 _ERROR_PREFIXES = ("K线数据获取失败", "Error", "No data found")
 
 
 def _post_close_available_at(trade_date: date) -> datetime:
-    return datetime.combine(trade_date, time(15, 30), tzinfo=timezone.utc)
+    return datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI)
+
+
+def _not_implemented(method: str) -> DataResult:
+    now = datetime.now(tz=SHANGHAI)
+    return DataResult(
+        data=None,
+        status=DataStatus.NOT_AVAILABLE_YET,
+        source="existing_astock",
+        as_of=now,
+        available_at=now,
+        pit_level=PITLevel.PIT_REQUIRED,
+        errors=[f"{method} not implemented in MVP adapter"],
+    )
 
 
 def _is_error_text(text: str) -> bool:
@@ -56,13 +77,16 @@ def _parse_csv_body(text: str, symbol: str) -> list[dict]:
 class ExistingAStockProvider:
     name = "existing_astock"
 
-    def list_securities(self, as_of: date) -> DataResult[list]:
+    def list_securities(self, as_of: date) -> DataResult[list[SecurityRecord]]:
         raise NotImplementedError("list_securities not implemented in MVP adapter")
+
+    def get_trade_calendar(self, start: date, end: date) -> DataResult[list[TradingDay]]:
+        return _not_implemented("get_trade_calendar")
 
     def get_daily_bars(
         self, symbols: Sequence[str], start: date, end: date
     ) -> DataResult[list[dict]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(tz=SHANGHAI)
         all_rows: list[dict] = []
         for symbol in symbols:
             raw = get_stock_data(symbol, start.isoformat(), end.isoformat())
@@ -99,7 +123,26 @@ class ExistingAStockProvider:
             errors=[],
         )
 
+    def get_daily_indicators(self, trade_date: date) -> DataResult[list[dict]]:
+        return _not_implemented("get_daily_indicators")
+
     def get_financials(
-        self, symbols: Sequence[str], available_before: date
+        self, symbols: Sequence[str], announced_before: datetime
     ) -> DataResult[list[dict]]:
         raise NotImplementedError("get_financials not implemented in MVP adapter")
+
+    def get_industry_members(
+        self, code: str, as_of: datetime
+    ) -> DataResult[list[Membership]]:
+        return _not_implemented("get_industry_members")
+
+    def get_concept_members(
+        self, code: str, as_of: datetime
+    ) -> DataResult[list[Membership]]:
+        return _not_implemented("get_concept_members")
+
+    def get_index_members(self, code: str, as_of: datetime) -> DataResult[list[Membership]]:
+        return _not_implemented("get_index_members")
+
+    def probe_capabilities(self) -> DataResult[list[ProviderCapability]]:
+        return _not_implemented("probe_capabilities")
