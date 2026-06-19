@@ -10,6 +10,7 @@ from typing import Optional
 import typer
 import yaml
 
+from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.pipeline import run_fixture_backtest
@@ -37,10 +38,10 @@ def data_health() -> None:
 
 @app.command("init-db")
 def init_db(home_dir: Path = typer.Option(Path("~/.tradingagents").expanduser(), "--home-dir")) -> None:
-    """Create or migrate the configured DuckDB file."""
-    db_path = home_dir / "data" / "market.duckdb"
-    MarketDataRepository(db_path)
-    typer.echo(f"initialized {db_path}")
+    """Create or migrate the fixture/test DuckDB file (not live market data)."""
+    paths = MarketDataPaths(home_dir=home_dir)
+    MarketDataRepository(paths.fixture_db_path)
+    typer.echo(f"initialized {paths.fixture_db_path}")
 
 
 def _load_fixture(path: Path) -> dict:
