@@ -65,14 +65,36 @@ class MarketDataRepository:
     def list_effective_symbols(
         self, as_of: date, available_before: datetime
     ) -> list[str]:
+        return [record.symbol for record in self.get_effective_securities(as_of, available_before)]
+
+    def get_effective_securities(
+        self, as_of: date, available_before: datetime
+    ) -> list[SecurityRecord]:
         rows = self.connection.execute(
-            """SELECT symbol FROM securities
+            """SELECT symbol, name, board, valid_from, valid_to, list_date,
+                      delist_date, status, st_flag, available_at, source
+               FROM securities
                WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
                  AND available_at <= ?
                ORDER BY symbol""",
             [as_of, as_of, available_before],
         ).fetchall()
-        return [row[0] for row in rows]
+        return [
+            SecurityRecord(
+                symbol=row[0],
+                name=row[1],
+                board=row[2],
+                valid_from=row[3],
+                valid_to=row[4],
+                list_date=row[5],
+                delist_date=row[6],
+                status=row[7],
+                st_flag=row[8],
+                available_at=row[9],
+                source=row[10],
+            )
+            for row in rows
+        ]
 
     def upsert_daily_bars(self, bars: Iterable[dict]) -> None:
         rows = [
@@ -143,6 +165,8 @@ class MarketDataRepository:
             )
             for row in rows
         ]
+        if not values:
+            return
         self.connection.executemany(
             """INSERT OR REPLACE INTO financials
                (symbol, report_period, roe, operating_cashflow, net_profit,
