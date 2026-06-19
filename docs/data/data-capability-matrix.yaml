@@ -1,0 +1,38 @@
+version: 1
+datasets:
+  daily_bars:
+    source: mootdx+sina
+    history_start: "provider-dependent"
+    update_frequency: daily
+    available_at: next_post_close_run
+    pit_level: pit_required
+  adjustment_factors:
+    source: provider-audit-required
+    history_start: "provider-dependent"
+    update_frequency: daily
+    available_at: next_post_close_run
+    pit_level: best_effort
+  security_master:
+    source: mootdx+exchange-metadata
+    history_start: "provider-dependent"
+    update_frequency: daily
+    available_at: source_publication_time
+    pit_level: pit_required
+  financials:
+    source: sina+exchange-disclosure-time
+    history_start: "provider-dependent"
+    update_frequency: daily
+    available_at: disclosure_time
+    pit_level: pit_required
+  concept_members:
+    source: eastmoney+baidu
+    history_start: current_snapshot_only
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+  fund_flow:
+    source: eastmoney
+    history_start: limited_recent_history
+    update_frequency: intraday
+    available_at: ingestion_time
+    pit_level: best_effort
