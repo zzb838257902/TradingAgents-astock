@@ -188,8 +188,6 @@ class BacktestEngine:
             if symbol not in day_bars and (current > 0 or targets.get(symbol, 0) > 0):
                 raise ValueError(f"missing bar for held symbol {symbol}")
 
-        equity = self._portfolio_equity_at_prev_close(cash, lots, prev_day_bars)
-
         for symbol in symbols:
             if symbol not in day_bars:
                 continue
@@ -207,12 +205,22 @@ class BacktestEngine:
                 board=bar_data.get("board", "main"),
             )
             current_shares = sum(lot.shares for lot in lots.get(symbol, []))
-            target_shares = int(equity * targets.get(symbol, 0.0) / prev_close / 100) * 100
+            target_value = self.initial_cash * targets.get(symbol, 0.0)
+            target_shares = int(target_value / prev_close / 100) * 100
+            if target_shares > 0 and bar.open > 0:
+                max_shares_at_open = int(target_value / bar.open / 100) * 100
+                target_shares = min(target_shares, max_shares_at_open)
             delta = target_shares - current_shares
             if delta == 0:
                 continue
 
             if delta > 0:
+                max_affordable = int(
+                    cash / (bar.open * (1 + self.execution.commission_rate)) / 100
+                ) * 100
+                delta = min(delta, max_affordable)
+                if delta <= 0:
+                    continue
                 order = Order(symbol=symbol, side=Side.BUY, shares=delta)
                 sellable = 0
             else:
