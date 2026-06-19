@@ -36,3 +36,18 @@ def test_filters_st_new_suspended_and_illiquid_stocks():
         "B": ["st"], "C": ["new_listing"], "D": ["suspended"],
         "E": ["illiquid"]
     }
+
+
+def test_new_listing_uses_trading_days_not_calendar_days():
+    trading_dates = [
+        date(2025, 12, 22), date(2025, 12, 23), date(2025, 12, 24), date(2025, 12, 25),
+    ]
+    result = filter_universe(
+        [candidate("C", list_date=date(2025, 12, 20))],
+        as_of=date(2025, 12, 25),
+        min_listing_days=5,
+        min_avg_amount_20d=1,
+        trading_dates=trading_dates,
+    )
+    assert result.included == []
+    assert result.excluded_reasons["C"] == ["new_listing"]
