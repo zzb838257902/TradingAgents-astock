@@ -72,12 +72,15 @@ def run_fixture_backtest(
     fixture: dict,
     config: ScreenerConfig,
     db_path: Path,
+    *,
+    reload: bool = True,
 ) -> dict:
     require_pit_required(fixture.get("datasets", {}).get("daily_bars", "pit_required"), "daily_bars")
     require_pit_required(fixture.get("datasets", {}).get("financials", "pit_required"), "financials")
 
     repo = MarketDataRepository(db_path)
-    load_fixture_into_repository(repo, fixture)
+    if reload:
+        load_fixture_into_repository(repo, fixture)
 
     bars_for_bt: dict[date, dict[str, dict]] = {}
     for trade_date_str, day_bars in fixture["bars"].items():
@@ -106,13 +109,21 @@ def run_fixture_backtest(
         if not history:
             continue
         signal_bar = signal_day_bars.get(symbol, history[-1])
-        suspended = bool(signal_bar.get("suspended", signal_bar.get("volume", 0) <= 0))
+        suspended = repo.is_suspended_on(symbol, signal_date, signal_time) or bool(
+            signal_bar.get("suspended", signal_bar.get("volume", 0) <= 0)
+        )
+        st_flag = repo.is_st_on(
+            symbol,
+            signal_date,
+            signal_time,
+            fallback=record.st_flag,
+        )
         candidates.append(CandidateInput(
             symbol=symbol,
             name=record.name,
             industry=industry,
             list_date=record.list_date,
-            st_flag=record.st_flag,
+            st_flag=st_flag,
             suspended=suspended,
             avg_amount_20d=_avg_amount_20d(history, signal_date),
         ))

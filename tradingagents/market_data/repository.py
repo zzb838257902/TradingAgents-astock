@@ -658,3 +658,275 @@ class MarketDataRepository:
             "file_path", "ingested_at", "api_version",
         ]
         return dict(zip(columns, row))
+
+    def upsert_security_status_history(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["status"],
+                row["effective_from"],
+                row.get("effective_to"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO security_status_history
+               (symbol, status, effective_from, effective_to, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def is_st_on(
+        self,
+        symbol: str,
+        as_of: date,
+        available_before: datetime,
+        fallback: bool = False,
+    ) -> bool:
+        row = self.connection.execute(
+            """SELECT 1
+               FROM security_status_history s
+               LEFT JOIN dataset_versions v ON s.dataset_version_id = v.version_id
+               WHERE s.symbol = ?
+                 AND s.effective_from <= ?
+                 AND (s.effective_to IS NULL OR s.effective_to > ?)
+                 AND s.available_at <= ?
+                 AND (s.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+                 AND UPPER(s.status) LIKE 'ST%'
+               LIMIT 1""",
+            [symbol, as_of, as_of, available_before],
+        ).fetchone()
+        if row is not None:
+            return True
+        return fallback
+
+    def upsert_name_history(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["name"],
+                row["effective_from"],
+                row.get("effective_to"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO name_history
+               (symbol, name, effective_from, effective_to, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def upsert_suspension_events(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["start_date"],
+                row.get("end_date"),
+                row.get("reason"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO suspension_events
+               (symbol, start_date, end_date, reason, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def is_suspended_on(
+        self,
+        symbol: str,
+        trade_date: date,
+        available_before: datetime,
+    ) -> bool:
+        row = self.connection.execute(
+            """SELECT 1
+               FROM suspension_events s
+               LEFT JOIN dataset_versions v ON s.dataset_version_id = v.version_id
+               WHERE s.symbol = ?
+                 AND s.start_date <= ?
+                 AND (s.end_date IS NULL OR s.end_date >= ?)
+                 AND s.available_at <= ?
+                 AND (s.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+               LIMIT 1""",
+            [symbol, trade_date, trade_date, available_before],
+        ).fetchone()
+        return row is not None
+
+    def upsert_adjustment_factors(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["trade_date"],
+                row["factor"],
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO adjustment_factors
+               (symbol, trade_date, factor, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def get_adjustment_factors(
+        self,
+        symbols: list[str],
+        end: date,
+        available_before: datetime,
+        start: date | None = None,
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        params: list = list(symbols)
+        query = f"""
+            SELECT a.symbol, a.trade_date, a.factor, a.available_at, a.source
+            FROM adjustment_factors a
+            LEFT JOIN dataset_versions v ON a.dataset_version_id = v.version_id
+            WHERE a.symbol IN ({placeholders})
+              AND a.trade_date <= ?
+              AND a.available_at <= ?
+              AND (a.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+        """
+        params.extend([end, available_before])
+        if start is not None:
+            query += " AND a.trade_date >= ?"
+            params.append(start)
+        query += " ORDER BY a.symbol, a.trade_date"
+        columns = ["symbol", "trade_date", "factor", "available_at", "source"]
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
+    def upsert_corporate_actions(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["ex_date"],
+                row["action_type"],
+                row.get("cash_div"),
+                row.get("stock_div"),
+                row.get("split_ratio"),
+                row.get("rights_ratio"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO corporate_actions
+               (symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
+                rights_ratio, available_at, source, ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def get_corporate_actions(
+        self,
+        symbols: list[str],
+        end: date,
+        available_before: datetime,
+        start: date | None = None,
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        params: list = list(symbols)
+        query = f"""
+            SELECT a.symbol, a.ex_date, a.action_type, a.cash_div, a.stock_div,
+                   a.split_ratio, a.rights_ratio, a.available_at, a.source
+            FROM corporate_actions a
+            LEFT JOIN dataset_versions v ON a.dataset_version_id = v.version_id
+            WHERE a.symbol IN ({placeholders})
+              AND a.ex_date <= ?
+              AND a.available_at <= ?
+              AND (a.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+        """
+        params.extend([end, available_before])
+        if start is not None:
+            query += " AND a.ex_date >= ?"
+            params.append(start)
+        query += " ORDER BY a.symbol, a.ex_date"
+        columns = [
+            "symbol", "ex_date", "action_type", "cash_div", "stock_div",
+            "split_ratio", "rights_ratio", "available_at", "source",
+        ]
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
+    def upsert_price_limits(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["trade_date"],
+                row["limit_up"],
+                row["limit_down"],
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO price_limits
+               (symbol, trade_date, limit_up, limit_down, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def list_quality_events(self, dataset: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT event_id, dataset, version_id, rule, severity,
+                      numerator, denominator, detail_json, created_at
+               FROM data_quality_events
+               WHERE dataset = ?
+               ORDER BY created_at""",
+            [dataset],
+        ).fetchall()
+        columns = [
+            "event_id", "dataset", "version_id", "rule", "severity",
+            "numerator", "denominator", "detail_json", "created_at",
+        ]
+        results = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            item["detail_json"] = json.loads(item["detail_json"])
+            results.append(item)
+        return results

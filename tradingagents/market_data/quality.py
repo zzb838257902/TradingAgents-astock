@@ -116,3 +116,33 @@ def build_security_coverage_report(
         threshold=threshold,
         exclusions=exclusions or [],
     )
+
+
+def audit_price_limits(rows: list[dict], tolerance: float = 0.01) -> list[dict[str, Any]]:
+    from tradingagents.backtest.limits import compute_limit_prices
+
+    issues: list[dict[str, Any]] = []
+    for row in rows:
+        expected_up, expected_down = compute_limit_prices(
+            float(row["prev_close"]),
+            st_flag=bool(row.get("st_flag", False)),
+            board=str(row.get("board", "main")),
+        )
+        supplier_up = float(row["supplier_limit_up"])
+        supplier_down = float(row["supplier_limit_down"])
+        if (
+            abs(supplier_up - expected_up) > tolerance
+            or abs(supplier_down - expected_down) > tolerance
+        ):
+            issues.append({
+                "rule": "limit_price_mismatch",
+                "symbol": row["symbol"],
+                "trade_date": row["trade_date"].isoformat()
+                if isinstance(row["trade_date"], date)
+                else row["trade_date"],
+                "expected_limit_up": expected_up,
+                "expected_limit_down": expected_down,
+                "supplier_limit_up": supplier_up,
+                "supplier_limit_down": supplier_down,
+            })
+    return issues
