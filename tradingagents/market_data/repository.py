@@ -1,0 +1,113 @@
+from datetime import date
+from pathlib import Path
+from typing import Iterable
+
+import duckdb
+
+from tradingagents.market_data.contracts import SecurityRecord
+
+
+class MarketDataRepository:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = duckdb.connect(str(path))
+        self._migrate()
+
+    def _migrate(self) -> None:
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS securities (
+                symbol VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                board VARCHAR NOT NULL,
+                valid_from DATE NOT NULL,
+                valid_to DATE,
+                list_date DATE NOT NULL,
+                delist_date DATE,
+                status VARCHAR NOT NULL,
+                st_flag BOOLEAN NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                PRIMARY KEY(symbol, valid_from)
+            );
+            CREATE TABLE IF NOT EXISTS daily_bars (
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                open DOUBLE NOT NULL,
+                high DOUBLE NOT NULL,
+                low DOUBLE NOT NULL,
+                close DOUBLE NOT NULL,
+                volume DOUBLE NOT NULL,
+                amount DOUBLE NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                PRIMARY KEY(symbol, trade_date, source)
+            );
+        """)
+
+    def upsert_security_records(self, records: Iterable[SecurityRecord]) -> None:
+        rows = [tuple(record.model_dump().values()) for record in records]
+        self.connection.executemany(
+            "INSERT OR REPLACE INTO securities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+    def list_effective_symbols(self, as_of: date) -> list[str]:
+        rows = self.connection.execute(
+            """SELECT symbol FROM securities
+               WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
+               ORDER BY symbol""",
+            [as_of, as_of],
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def upsert_daily_bars(self, bars: Iterable[dict]) -> None:
+        rows = [
+            (
+                bar["symbol"],
+                bar["trade_date"],
+                bar["open"],
+                bar["high"],
+                bar["low"],
+                bar["close"],
+                bar["volume"],
+                bar["amount"],
+                bar["available_at"],
+                bar["source"],
+            )
+            for bar in bars
+        ]
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO daily_bars
+               (symbol, trade_date, open, high, low, close, volume, amount,
+                available_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
+    def get_daily_bars(
+        self,
+        symbols: list[str],
+        end: date,
+        start: date | None = None,
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        params: list = list(symbols)
+        query = f"""
+            SELECT symbol, trade_date, open, high, low, close, volume, amount,
+                   available_at, source
+            FROM daily_bars
+            WHERE symbol IN ({placeholders}) AND trade_date <= ?
+        """
+        params.append(end)
+        if start is not None:
+            query += " AND trade_date >= ?"
+            params.append(start)
+        query += " ORDER BY symbol, trade_date"
+        columns = [
+            "symbol", "trade_date", "open", "high", "low", "close",
+            "volume", "amount", "available_at", "source",
+        ]
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(zip(columns, row)) for row in rows]
