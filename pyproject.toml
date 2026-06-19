@@ -49,8 +49,10 @@ Upstream = "https://github.com/TauricResearch/TradingAgents"
 google = ["langchain-google-genai>=4.0.0"]
 screener = [
     "duckdb>=1.3,<2",
-    "pyarrow>=19,<22",
     "PyYAML>=6.0,<7",
+]
+screener-arrow = [
+    "pyarrow>=19,<22",
 ]
 dev = [
     "pytest>=8.3,<9",
