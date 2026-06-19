@@ -268,6 +268,24 @@ streamlit run web/app.py
 
 ---
 
+## 自动选股 MVP
+
+实验性自动选股纵向闭环（阶段 0–3）：PIT 数据契约、动量+质量策略、组合约束与确定性回测。不影响现有单股分析 CLI/Web。
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[screener,dev]"
+python -m pytest tests/ -v
+tradingagents-screen data-health
+tradingagents-screen init-db --home-dir ~/.tradingagents
+tradingagents-screen backtest-fixture \
+  --fixture tests/fixtures/screener/mvp_market.json \
+  --home-dir /tmp/tradingagents-mvp
+```
+
+---
+
 ## 配置说明
 
 所有配置通过 `config` 字典传入，完整选项：
