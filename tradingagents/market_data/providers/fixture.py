@@ -297,6 +297,15 @@ class FixtureProvider:
                     pit_level=PITLevel.PIT_REQUIRED,
                     probed_at=run_time,
                 ))
+        if self._fixture.get("symbols"):
+            if not any(item.dataset == "security_master" for item in capabilities):
+                capabilities.append(ProviderCapability(
+                    dataset="security_master",
+                    endpoint="stock_basic",
+                    permitted=True,
+                    pit_level=PITLevel.PIT_REQUIRED,
+                    probed_at=run_time,
+                ))
         board_types = {item.get("board_type") for item in self._fixture.get("board_memberships", [])}
         board_probe = {
             "industry": ("industry_members", "index_member_all"),
