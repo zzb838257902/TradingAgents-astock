@@ -15,7 +15,8 @@ from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
-from tradingagents.screener.pipeline import run_fixture_backtest
+from tradingagents.screener.pipeline import run_fixture_backtest, run_screen
+from tradingagents.screener.report import ScreeningStatus
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
 
 app = typer.Typer(help="TradingAgents automatic stock screening MVP")
@@ -73,6 +74,15 @@ def backtest_fixture(
     typer.echo(json.dumps(output, ensure_ascii=False, sort_keys=True))
 
 
+def _emit_report(report, extra: dict | None = None) -> None:
+    payload = report.to_output_dict()
+    if extra:
+        payload = {**extra, **payload}
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    if report.status == ScreeningStatus.DATA_ERROR:
+        raise typer.Exit(code=1)
+
+
 @app.command("screen")
 def screen(
     fixture: Path = typer.Option(..., "--fixture"),
@@ -106,20 +116,16 @@ def screen(
         symbols=custom_symbols,
         as_of=signal_time,
     )
-    output = {
+    report = run_screen(
+        fixture_data,
+        config,
+        config.home_dir / "data" / "market.duckdb",
+        universe_request=universe_request,
+    )
+    _emit_report(report, extra={
         "config_hash": _config_hash(config),
         "fixture_sha256": _fixture_sha256(fixture),
-        "universe": universe,
-        "universe_code": universe_code,
-        "as_of": signal_time.isoformat(),
-        **run_fixture_backtest(
-            fixture_data,
-            config,
-            config.home_dir / "data" / "market.duckdb",
-            universe_request=universe_request,
-        ),
-    }
-    typer.echo(json.dumps(output, ensure_ascii=False, sort_keys=True))
+    })
 
 
 if __name__ == "__main__":

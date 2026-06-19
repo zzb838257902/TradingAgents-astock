@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+import uuid
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,7 @@ from tradingagents.backtest.engine import BacktestEngine
 from tradingagents.backtest.execution import ExecutionModel
 from tradingagents.backtest.limits import enrich_bars_with_limits
 from tradingagents.backtest.metrics import performance_metrics
+from tradingagents.market_data.contracts import PITLevel
 from tradingagents.market_data.fixture_store import load_fixture_into_repository
 from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.pit import require_pit_required
@@ -19,9 +21,18 @@ from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.factors import compute_momentum, compute_quality, rank_score
 from tradingagents.screener.models import CandidateInput
 from tradingagents.screener.portfolio import construct_portfolio
+from tradingagents.screener.report import (
+    RunReport,
+    ScreeningStatus,
+    compute_industry_weights,
+)
 from tradingagents.screener.strategy import score_candidates
 from tradingagents.screener.universe import filter_universe
-from tradingagents.screener.universe_resolver import UniverseRequest, UniverseResolver
+from tradingagents.screener.universe_resolver import (
+    UniverseRequest,
+    UniverseResolver,
+    UniverseType,
+)
 
 
 def _resolve_signal_date(trading_dates: list[date]) -> date:
@@ -55,30 +66,76 @@ def _avg_amount_20d(rows: list[dict], signal_date: date) -> float:
     return sum(window) / len(window) if window else 0.0
 
 
-def _empty_result(excluded_reasons: dict[str, list[str]] | None = None) -> dict:
-    return {
-        "metrics": {},
-        "positions": 0,
-        "orders": [],
-        "top_symbol": None,
-        "ranking": [],
-        "target_weights": {},
-        "cash_weight": 1.0,
-        "excluded_reasons": excluded_reasons or {},
-        "industry_by_symbol": {},
-    }
+def _collect_dataset_versions(repo: MarketDataRepository) -> dict[str, dict | None]:
+    datasets = ("security_master", "daily_bars", "trade_calendar", "financials")
+    return {name: repo.get_latest_published_version(name) for name in datasets}
 
 
-def run_fixture_backtest(
+def _collect_data_sources(fixture: dict, repo: MarketDataRepository, signal_time: datetime) -> dict[str, str]:
+    sources = {"daily_bars": "fixture", "financials": "fixture"}
+    securities = repo.get_effective_securities(signal_time.date(), signal_time)
+    if securities:
+        sources["security_master"] = securities[0].source
+    return sources
+
+
+def _base_report(
+    *,
+    run_id: str,
+    signal_time: datetime,
+    universe_request: UniverseRequest,
+    universe_size: int = 0,
+    pit_level: str = PITLevel.PIT_REQUIRED.value,
+    dataset_versions: dict[str, dict | None] | None = None,
+    data_sources: dict[str, str] | None = None,
+    excluded_reasons: dict[str, list[str]] | None = None,
+    status: ScreeningStatus = ScreeningStatus.OK,
+    errors: list[str] | None = None,
+) -> RunReport:
+    excluded = excluded_reasons or {}
+    return RunReport(
+        run_id=run_id,
+        status=status,
+        signal_time=signal_time,
+        data_as_of=signal_time,
+        dataset_versions=dataset_versions or {},
+        data_sources=data_sources or {},
+        pit_level=pit_level,
+        universe_type=universe_request.universe_type.value,
+        universe_code=universe_request.universe_code,
+        universe_size=universe_size,
+        excluded_count=len(excluded),
+        excluded_reasons=excluded,
+        errors=errors or [],
+    )
+
+
+def run_screen(
     fixture: dict,
     config: ScreenerConfig,
     db_path: Path,
     *,
     reload: bool = True,
     universe_request: UniverseRequest | None = None,
-) -> dict:
-    require_pit_required(fixture.get("datasets", {}).get("daily_bars", "pit_required"), "daily_bars")
-    require_pit_required(fixture.get("datasets", {}).get("financials", "pit_required"), "financials")
+    run_id: str | None = None,
+) -> RunReport:
+    run = run_id or str(uuid.uuid4())
+    try:
+        require_pit_required(fixture.get("datasets", {}).get("daily_bars", "pit_required"), "daily_bars")
+        require_pit_required(fixture.get("datasets", {}).get("financials", "pit_required"), "financials")
+    except ValueError as exc:
+        signal_time = datetime.now().astimezone()
+        request = universe_request or UniverseRequest(
+            universe_type=UniverseType.ALL,
+            as_of=signal_time,
+        )
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            status=ScreeningStatus.DATA_ERROR,
+            errors=[str(exc)],
+        )
 
     repo = MarketDataRepository(db_path)
     if reload:
@@ -92,17 +149,38 @@ def run_fixture_backtest(
     signal_date = _resolve_signal_date(trading_dates)
     signal_time = post_close_signal_time(signal_date)
     portfolio_value = config.portfolio.portfolio_value
+    request = universe_request or UniverseRequest(
+        universe_type=UniverseType.ALL,
+        as_of=signal_time,
+    )
+    dataset_versions = _collect_dataset_versions(repo)
+    data_sources = _collect_data_sources(fixture, repo, signal_time)
+
+    resolved = UniverseResolver(repo).resolve(request.model_copy(update={"as_of": signal_time}))
+    pit_level = resolved.pit_level.value if resolved.pit_level else PITLevel.PIT_REQUIRED.value
+    if not resolved.is_ok:
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            universe_size=resolved.raw_member_count,
+            pit_level=pit_level,
+            dataset_versions=dataset_versions,
+            data_sources=data_sources,
+            status=ScreeningStatus.DATA_ERROR,
+            errors=resolved.errors,
+        )
 
     symbol_meta = {item["symbol"]: item for item in fixture["symbols"]}
     effective = repo.get_effective_securities(signal_date, signal_time)
-    if universe_request is not None:
-        resolved = UniverseResolver(repo).resolve(
-            universe_request.model_copy(update={"as_of": signal_time})
-        )
-        if not resolved.is_ok:
-            raise ValueError("; ".join(resolved.errors))
-        allowed = set(resolved.symbols)
+    allowed = set(resolved.symbols) if request.universe_type != UniverseType.ALL else None
+    if allowed is not None:
         effective = [record for record in effective if record.symbol in allowed]
+    universe_size = (
+        resolved.raw_member_count
+        if request.universe_type != UniverseType.ALL
+        else len(effective)
+    )
 
     all_symbols = [record.symbol for record in effective]
     daily_by_symbol: dict[str, list[dict]] = {symbol: [] for symbol in all_symbols}
@@ -146,7 +224,17 @@ def run_fixture_backtest(
         trading_dates=trading_dates,
     )
     if not universe.included:
-        return _empty_result(universe.excluded_reasons)
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            universe_size=universe_size,
+            pit_level=pit_level,
+            dataset_versions=dataset_versions,
+            data_sources=data_sources,
+            excluded_reasons=universe.excluded_reasons,
+            status=ScreeningStatus.EMPTY_UNIVERSE,
+        )
 
     included_symbols = {item.symbol for item in universe.included}
     financial_rows = repo.get_financials(list(included_symbols), available_before=signal_time)
@@ -183,7 +271,17 @@ def run_fixture_backtest(
         })
 
     if not rows:
-        return _empty_result(universe.excluded_reasons)
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            universe_size=universe_size,
+            pit_level=pit_level,
+            dataset_versions=dataset_versions,
+            data_sources=data_sources,
+            excluded_reasons=universe.excluded_reasons,
+            status=ScreeningStatus.EMPTY_UNIVERSE,
+        )
 
     momentum_scores = rank_score(pd.Series(raw_momentum))
     quality_scores = rank_score(pd.Series(raw_quality))
@@ -208,7 +306,8 @@ def run_fixture_backtest(
     )
 
     target_weights = _portfolio_target_weights(portfolio, portfolio_value)
-    cash_weight = portfolio.cash / portfolio_value
+    rounded_weights = {symbol: round(weight, 10) for symbol, weight in target_weights.items()}
+    cash_weight = round(portfolio.cash / portfolio_value, 10)
     enriched_bars = enrich_bars_with_limits(bars_for_bt, fixture.get("symbols", []))
 
     engine = BacktestEngine(
@@ -219,14 +318,14 @@ def run_fixture_backtest(
     delistings = {
         date.fromisoformat(k): v for k, v in fixture.get("delistings", {}).items()
     }
-    result = engine.run(
+    backtest = engine.run(
         bars=enriched_bars,
         target_weights={signal_date: target_weights},
         delistings=delistings,
     )
     equity = pd.Series(
-        [point.equity for point in result.equity_curve],
-        index=[point.trade_date for point in result.equity_curve],
+        [point.equity for point in backtest.equity_curve],
+        index=[point.trade_date for point in backtest.equity_curve],
     )
     metrics = performance_metrics(equity) if len(equity) > 1 else {}
     ranking = scored.sort_values("ensemble_score", ascending=False)["symbol"].tolist()
@@ -238,16 +337,59 @@ def run_fixture_backtest(
             "price": order.price,
             "trade_date": order.trade_date.isoformat(),
         }
-        for order in result.orders
+        for order in backtest.orders
     ]
-    return {
-        "metrics": metrics,
-        "positions": len(portfolio.positions),
-        "orders": orders,
-        "top_symbol": ranking[0] if ranking else None,
-        "ranking": ranking,
-        "target_weights": {symbol: round(weight, 10) for symbol, weight in target_weights.items()},
-        "cash_weight": round(cash_weight, 10),
-        "excluded_reasons": universe.excluded_reasons,
-        "industry_by_symbol": industry_by_symbol,
+    factor_contributions = {
+        symbol: {
+            "momentum": float(momentum_scores.get(symbol, 0.0)),
+            "quality": float(quality_scores.get(symbol, 0.0)),
+        }
+        for symbol in ranking
     }
+    industry_weights = compute_industry_weights(rounded_weights, industry_by_symbol)
+
+    return RunReport(
+        run_id=run,
+        status=ScreeningStatus.OK,
+        signal_time=signal_time,
+        data_as_of=signal_time,
+        dataset_versions=dataset_versions,
+        data_sources=data_sources,
+        pit_level=pit_level,
+        universe_type=request.universe_type.value,
+        universe_code=request.universe_code,
+        universe_size=universe_size,
+        included_count=len(universe.included),
+        excluded_count=len(universe.excluded_reasons),
+        excluded_reasons=universe.excluded_reasons,
+        ranking=ranking,
+        factor_contributions=factor_contributions,
+        target_weights=rounded_weights,
+        cash_weight=cash_weight,
+        industry_by_symbol=industry_by_symbol,
+        industry_weights=industry_weights,
+        orders=orders,
+        metrics=metrics,
+        positions=len(portfolio.positions),
+        top_symbol=ranking[0] if ranking else None,
+    )
+
+
+def run_fixture_backtest(
+    fixture: dict,
+    config: ScreenerConfig,
+    db_path: Path,
+    *,
+    reload: bool = True,
+    universe_request: UniverseRequest | None = None,
+) -> dict:
+    report = run_screen(
+        fixture,
+        config,
+        db_path,
+        reload=reload,
+        universe_request=universe_request,
+    )
+    if report.status == ScreeningStatus.DATA_ERROR:
+        raise ValueError("; ".join(report.errors) or "screening data error")
+    return report.to_legacy_dict()
