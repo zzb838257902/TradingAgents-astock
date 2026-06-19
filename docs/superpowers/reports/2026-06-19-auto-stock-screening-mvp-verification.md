@@ -1,7 +1,7 @@
 # Auto Stock Screening MVP Verification Report
 
 > Date: 2026-06-19 (post-defect-fix)  
-> Commit tested: `2aa27015`  
+> Commit tested: `2fedf809`  
 > Environment: WSL2, Python 3.14.4, Linux x86_64
 
 ## Defect fixes verified
