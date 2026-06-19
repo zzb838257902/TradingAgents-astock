@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -42,6 +42,17 @@ class MarketDataRepository:
                 source VARCHAR NOT NULL,
                 PRIMARY KEY(symbol, trade_date, source)
             );
+            CREATE TABLE IF NOT EXISTS financials (
+                symbol VARCHAR NOT NULL,
+                report_period VARCHAR NOT NULL,
+                roe DOUBLE NOT NULL,
+                operating_cashflow DOUBLE NOT NULL,
+                net_profit DOUBLE NOT NULL,
+                debt_ratio DOUBLE NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                PRIMARY KEY(symbol, report_period, source)
+            );
         """)
 
     def upsert_security_records(self, records: Iterable[SecurityRecord]) -> None:
@@ -51,12 +62,15 @@ class MarketDataRepository:
             rows,
         )
 
-    def list_effective_symbols(self, as_of: date) -> list[str]:
+    def list_effective_symbols(
+        self, as_of: date, available_before: datetime
+    ) -> list[str]:
         rows = self.connection.execute(
             """SELECT symbol FROM securities
                WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
+                 AND available_at <= ?
                ORDER BY symbol""",
-            [as_of, as_of],
+            [as_of, as_of, available_before],
         ).fetchall()
         return [row[0] for row in rows]
 
@@ -88,6 +102,7 @@ class MarketDataRepository:
         self,
         symbols: list[str],
         end: date,
+        available_before: datetime,
         start: date | None = None,
     ) -> list[dict]:
         if not symbols:
@@ -98,9 +113,11 @@ class MarketDataRepository:
             SELECT symbol, trade_date, open, high, low, close, volume, amount,
                    available_at, source
             FROM daily_bars
-            WHERE symbol IN ({placeholders}) AND trade_date <= ?
+            WHERE symbol IN ({placeholders})
+              AND trade_date <= ?
+              AND available_at <= ?
         """
-        params.append(end)
+        params.extend([end, available_before])
         if start is not None:
             query += " AND trade_date >= ?"
             params.append(start)
@@ -111,3 +128,51 @@ class MarketDataRepository:
         ]
         rows = self.connection.execute(query, params).fetchall()
         return [dict(zip(columns, row)) for row in rows]
+
+    def upsert_financials(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["symbol"],
+                row["report_period"],
+                row["roe"],
+                row["operating_cashflow"],
+                row["net_profit"],
+                row["debt_ratio"],
+                row["available_at"],
+                row["source"],
+            )
+            for row in rows
+        ]
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO financials
+               (symbol, report_period, roe, operating_cashflow, net_profit,
+                debt_ratio, available_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def get_financials(
+        self, symbols: list[str], available_before: datetime
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        query = f"""
+            SELECT symbol, report_period, roe, operating_cashflow, net_profit,
+                   debt_ratio, available_at, source
+            FROM financials
+            WHERE symbol IN ({placeholders}) AND available_at <= ?
+            ORDER BY symbol, available_at DESC
+        """
+        params = [*symbols, available_before]
+        columns = [
+            "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
+            "debt_ratio", "available_at", "source",
+        ]
+        rows = self.connection.execute(query, params).fetchall()
+        latest: dict[str, dict] = {}
+        for row in rows:
+            record = dict(zip(columns, row))
+            if record["symbol"] not in latest:
+                latest[record["symbol"]] = record
+        return list(latest.values())

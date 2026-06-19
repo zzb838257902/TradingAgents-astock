@@ -1339,6 +1339,10 @@
     "2025-10-01": 100.0,
     "2026-01-20": 102.5
   },
+  "datasets": {
+    "daily_bars": "pit_required",
+    "financials": "pit_required"
+  },
   "delistings": {
     "2026-01-15": [
       "600001"

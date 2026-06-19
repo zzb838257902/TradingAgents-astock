@@ -1,0 +1,79 @@
+"""Load deterministic fixtures into MarketDataRepository."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timezone
+
+from tradingagents.market_data.contracts import SecurityRecord
+from tradingagents.market_data.repository import MarketDataRepository
+
+
+def _parse_available_at(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(value)
+
+
+def _bar_available_at(trade_date: date) -> datetime:
+    return datetime.combine(trade_date, time(15, 30), tzinfo=timezone.utc)
+
+
+def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> None:
+    trading_dates = sorted(date.fromisoformat(key) for key in fixture["bars"])
+    securities: list[SecurityRecord] = []
+    for item in fixture["symbols"]:
+        symbol = item["symbol"]
+        list_date = trading_dates[0]
+        delist_date = None
+        valid_to = None
+        if item.get("delist_after"):
+            delist_key = next(iter(fixture.get("delistings", {})), None)
+            if delist_key:
+                delist_date = date.fromisoformat(delist_key)
+                valid_to = delist_date
+        securities.append(SecurityRecord(
+            symbol=symbol,
+            name=symbol,
+            board=item.get("board", "main"),
+            valid_from=list_date,
+            valid_to=valid_to,
+            list_date=list_date,
+            delist_date=delist_date,
+            status="listed",
+            st_flag=item.get("st_flag", False),
+            available_at=datetime.combine(list_date, time(9, 0), tzinfo=timezone.utc),
+            source="fixture",
+        ))
+    repo.upsert_security_records(securities)
+
+    daily_bars = []
+    for trade_date_str, day_bars in fixture["bars"].items():
+        trade_date = date.fromisoformat(trade_date_str)
+        for symbol, bar in day_bars.items():
+            daily_bars.append({
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "open": bar["open"],
+                "high": bar["high"],
+                "low": bar["low"],
+                "close": bar["close"],
+                "volume": bar["volume"],
+                "amount": bar.get("amount", bar["close"] * bar["volume"]),
+                "available_at": _bar_available_at(trade_date),
+                "source": "fixture",
+            })
+    repo.upsert_daily_bars(daily_bars)
+
+    financials = []
+    for row in fixture.get("financials", []):
+        financials.append({
+            "symbol": row["symbol"],
+            "report_period": row["report_period"],
+            "roe": row["roe"],
+            "operating_cashflow": row["operating_cashflow"],
+            "net_profit": row["net_profit"],
+            "debt_ratio": row["debt_ratio"],
+            "available_at": _parse_available_at(row["available_at"]),
+            "source": "fixture",
+        })
+    repo.upsert_financials(financials)
