@@ -3,7 +3,8 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field
 
 from tradingagents.backtest.execution import ExecutionModel
-from tradingagents.backtest.models import Bar, Order, Side
+from tradingagents.backtest.limits import bar_from_dict
+from tradingagents.backtest.models import Order, Side
 
 
 class EquityPoint(BaseModel):
@@ -72,24 +73,26 @@ class BacktestEngine:
 
         for trade_date in trading_dates:
             day_bars = bars[trade_date]
+            prev_day_bars = bars.get(self._previous_trading_date(trading_dates, trade_date), {})
 
             if pending_targets is not None:
                 cash = self._execute_targets(
-                    trade_date, trading_dates, day_bars, pending_targets, cash, lots, orders
+                    trade_date,
+                    day_bars,
+                    prev_day_bars,
+                    pending_targets,
+                    cash,
+                    lots,
+                    orders,
                 )
                 pending_targets = None
-
-            held_symbols = [s for s, ls in lots.items() if sum(lot.shares for lot in ls) > 0]
-            for symbol in held_symbols:
-                if symbol not in day_bars:
-                    raise ValueError(f"missing bar for held symbol {symbol}")
 
             for symbol in delistings.get(trade_date, []):
                 symbol_lots = lots.get(symbol, [])
                 total_shares = sum(lot.shares for lot in symbol_lots)
                 if total_shares <= 0:
                     continue
-                bar_data = day_bars.get(symbol, {})
+                bar_data = day_bars.get(symbol) or prev_day_bars.get(symbol, {})
                 price = bar_data.get("close", 0.0)
                 proceeds = total_shares * price * self.delisting_recovery_rate
                 cash += proceeds
@@ -101,15 +104,17 @@ class BacktestEngine:
                 ))
                 lots[symbol] = []
 
+            held_symbols = [s for s, ls in lots.items() if sum(lot.shares for lot in ls) > 0]
+            for symbol in held_symbols:
+                if symbol in delistings.get(trade_date, []):
+                    continue
+                if symbol not in day_bars:
+                    raise ValueError(f"missing bar for held symbol {symbol}")
+
             if trade_date in target_weights:
                 pending_targets = target_weights[trade_date]
 
-            equity = cash
-            for symbol, symbol_lots in lots.items():
-                total = sum(lot.shares for lot in symbol_lots)
-                if total <= 0:
-                    continue
-                equity += total * day_bars[symbol]["close"]
+            equity = self._portfolio_equity(cash, lots, day_bars)
             equity_curve.append(EquityPoint(trade_date=trade_date, equity=equity))
 
         final_positions = {
@@ -130,26 +135,22 @@ class BacktestEngine:
             input_snapshot_id="",
         )
 
-    def _bar_from_dict(self, data: dict) -> Bar:
-        return Bar(
-            open=data["open"],
-            high=data["high"],
-            low=data["low"],
-            close=data["close"],
-            volume=data["volume"],
-            limit_up=data.get("limit_up", round(data["high"] * 1.1, 4)),
-            limit_down=data.get("limit_down", round(data["low"] * 0.9, 4)),
-            suspended=data.get("suspended", data["volume"] <= 0),
-        )
+    def _previous_trading_date(
+        self, trading_dates: list[date], trade_date: date
+    ) -> date | None:
+        index = trading_dates.index(trade_date)
+        if index == 0:
+            return None
+        return trading_dates[index - 1]
 
     def _sellable_shares(self, symbol: str, lots: list[_Lot], trade_date: date) -> int:
-        return sum(
-            lot.shares for lot in lots
-            if lot.acquired_date < trade_date
-        )
+        return sum(lot.shares for lot in lots if lot.acquired_date < trade_date)
 
     def _portfolio_equity(
-        self, cash: float, lots: dict[str, list[_Lot]], day_bars: dict[str, dict]
+        self,
+        cash: float,
+        lots: dict[str, list[_Lot]],
+        day_bars: dict[str, dict],
     ) -> float:
         equity = cash
         for symbol, symbol_lots in lots.items():
@@ -158,11 +159,24 @@ class BacktestEngine:
                 equity += total * day_bars[symbol]["close"]
         return equity
 
+    def _portfolio_equity_at_prev_close(
+        self,
+        cash: float,
+        lots: dict[str, list[_Lot]],
+        prev_day_bars: dict[str, dict],
+    ) -> float:
+        equity = cash
+        for symbol, symbol_lots in lots.items():
+            total = sum(lot.shares for lot in symbol_lots)
+            if total > 0 and symbol in prev_day_bars:
+                equity += total * prev_day_bars[symbol]["close"]
+        return equity
+
     def _execute_targets(
         self,
         trade_date: date,
-        trading_dates: list[date],
         day_bars: dict[str, dict],
+        prev_day_bars: dict[str, dict],
         targets: dict[str, float],
         cash: float,
         lots: dict[str, list[_Lot]],
@@ -174,14 +188,26 @@ class BacktestEngine:
             if symbol not in day_bars and (current > 0 or targets.get(symbol, 0) > 0):
                 raise ValueError(f"missing bar for held symbol {symbol}")
 
-        equity = self._portfolio_equity(cash, lots, day_bars)
+        equity = self._portfolio_equity_at_prev_close(cash, lots, prev_day_bars)
 
         for symbol in symbols:
             if symbol not in day_bars:
                 continue
-            bar = self._bar_from_dict(day_bars[symbol])
+            bar_data = day_bars[symbol]
+            prev_close = bar_data.get("prev_close")
+            if prev_close is None and symbol in prev_day_bars:
+                prev_close = prev_day_bars[symbol]["close"]
+            if prev_close is None:
+                raise ValueError(f"missing prev_close for strict sizing on {symbol}")
+
+            bar = bar_from_dict(
+                bar_data,
+                prev_close=prev_close,
+                st_flag=bar_data.get("st_flag", False),
+                board=bar_data.get("board", "main"),
+            )
             current_shares = sum(lot.shares for lot in lots.get(symbol, []))
-            target_shares = int(equity * targets.get(symbol, 0.0) / bar.close / 100) * 100
+            target_shares = int(equity * targets.get(symbol, 0.0) / prev_close / 100) * 100
             delta = target_shares - current_shares
             if delta == 0:
                 continue

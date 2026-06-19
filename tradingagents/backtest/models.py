@@ -28,6 +28,7 @@ class Bar(BaseModel):
     limit_up: float
     limit_down: float
     suspended: bool = False
+    prev_close: float | None = None
 
 
 class Fill(BaseModel):
