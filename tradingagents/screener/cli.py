@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -11,9 +12,11 @@ import typer
 import yaml
 
 from tradingagents.market_data.config import MarketDataPaths
+from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.pipeline import run_fixture_backtest
+from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
 
 app = typer.Typer(help="TradingAgents automatic stock screening MVP")
 
@@ -66,6 +69,55 @@ def backtest_fixture(
         "fixture_sha256": _fixture_sha256(fixture),
         "home_dir": str(config.home_dir),
         **run_fixture_backtest(fixture_data, config, config.home_dir / "data" / "market.duckdb"),
+    }
+    typer.echo(json.dumps(output, ensure_ascii=False, sort_keys=True))
+
+
+@app.command("screen")
+def screen(
+    fixture: Path = typer.Option(..., "--fixture"),
+    universe: str = typer.Option("all", "--universe"),
+    universe_code: Optional[str] = typer.Option(None, "--universe-code"),
+    symbols: Optional[str] = typer.Option(None, "--symbols"),
+    as_of: Optional[str] = typer.Option(None, "--as-of"),
+    home_dir: Path = typer.Option(Path("~/.tradingagents").expanduser(), "--home-dir"),
+    config_path: Optional[Path] = typer.Option(None, "--config"),
+) -> None:
+    """Screen a fixture universe (all/industry/index/custom) and print JSON."""
+    config = (
+        ScreenerConfig.from_yaml(config_path)
+        if config_path
+        else ScreenerConfig(home_dir=home_dir)
+    )
+    fixture_data = _load_fixture(fixture)
+    trading_dates = sorted(fixture_data["bars"])
+    signal_date = date.fromisoformat(trading_dates[-2])
+    signal_time = (
+        datetime.fromisoformat(as_of).astimezone()
+        if as_of
+        else post_close_signal_time(signal_date)
+    )
+    custom_symbols = tuple(
+        item.strip() for item in (symbols or "").split(",") if item.strip()
+    )
+    universe_request = UniverseRequest(
+        universe_type=UniverseType(universe),
+        universe_code=universe_code,
+        symbols=custom_symbols,
+        as_of=signal_time,
+    )
+    output = {
+        "config_hash": _config_hash(config),
+        "fixture_sha256": _fixture_sha256(fixture),
+        "universe": universe,
+        "universe_code": universe_code,
+        "as_of": signal_time.isoformat(),
+        **run_fixture_backtest(
+            fixture_data,
+            config,
+            config.home_dir / "data" / "market.duckdb",
+            universe_request=universe_request,
+        ),
     }
     typer.echo(json.dumps(output, ensure_ascii=False, sort_keys=True))
 

@@ -151,7 +151,48 @@ def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> N
             "source": "fixture",
         })
     repo.upsert_financials(financials)
+    _load_board_data_from_fixture(repo, fixture)
     _load_auxiliary_from_fixture(repo, fixture)
+
+
+def _load_board_data_from_fixture(repo: MarketDataRepository, fixture: dict) -> None:
+    definitions = []
+    for item in fixture.get("board_definitions", []):
+        definitions.append({
+            "board_type": item["board_type"],
+            "board_code": item["board_code"],
+            "name": item["name"],
+            "pit_level": item["pit_level"],
+            "source": "fixture",
+            "available_at": _parse_available_at(
+                item.get("available_at", "2020-01-01T09:00:00+08:00")
+            ),
+        })
+    repo.upsert_board_definitions(definitions)
+
+    memberships = []
+    for item in fixture.get("board_memberships", []):
+        memberships.append({
+            "board_type": item["board_type"],
+            "board_code": item["board_code"],
+            "symbol": item["symbol"],
+            "membership_mode": item["membership_mode"],
+            "effective_from": (
+                date.fromisoformat(item["effective_from"])
+                if item.get("effective_from") else None
+            ),
+            "effective_to": (
+                date.fromisoformat(item["effective_to"])
+                if item.get("effective_to") else None
+            ),
+            "snapshot_date": (
+                date.fromisoformat(item["snapshot_date"])
+                if item.get("snapshot_date") else None
+            ),
+            "available_at": _parse_available_at(item["available_at"]),
+            "source": "fixture",
+        })
+    repo.upsert_board_memberships(memberships)
 
 
 def load_fixture_as_published(repo: MarketDataRepository, fixture: dict) -> None:
@@ -177,4 +218,5 @@ def load_fixture_as_published(repo: MarketDataRepository, fixture: dict) -> None
             "source": "fixture",
         })
     repo.upsert_financials(financials)
+    _load_board_data_from_fixture(repo, fixture)
     _load_auxiliary_from_fixture(repo, fixture)

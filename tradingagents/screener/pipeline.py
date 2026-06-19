@@ -21,6 +21,7 @@ from tradingagents.screener.models import CandidateInput
 from tradingagents.screener.portfolio import construct_portfolio
 from tradingagents.screener.strategy import score_candidates
 from tradingagents.screener.universe import filter_universe
+from tradingagents.screener.universe_resolver import UniverseRequest, UniverseResolver
 
 
 def _resolve_signal_date(trading_dates: list[date]) -> date:
@@ -74,6 +75,7 @@ def run_fixture_backtest(
     db_path: Path,
     *,
     reload: bool = True,
+    universe_request: UniverseRequest | None = None,
 ) -> dict:
     require_pit_required(fixture.get("datasets", {}).get("daily_bars", "pit_required"), "daily_bars")
     require_pit_required(fixture.get("datasets", {}).get("financials", "pit_required"), "financials")
@@ -93,6 +95,14 @@ def run_fixture_backtest(
 
     symbol_meta = {item["symbol"]: item for item in fixture["symbols"]}
     effective = repo.get_effective_securities(signal_date, signal_time)
+    if universe_request is not None:
+        resolved = UniverseResolver(repo).resolve(
+            universe_request.model_copy(update={"as_of": signal_time})
+        )
+        if not resolved.is_ok:
+            raise ValueError("; ".join(resolved.errors))
+        allowed = set(resolved.symbols)
+        effective = [record for record in effective if record.symbol in allowed]
 
     all_symbols = [record.symbol for record in effective]
     daily_by_symbol: dict[str, list[dict]] = {symbol: [] for symbol in all_symbols}

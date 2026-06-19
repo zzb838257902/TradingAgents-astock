@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +61,8 @@ def sync_dataset(
     start: Optional[str] = typer.Option(None, "--start"),
     end: Optional[str] = typer.Option(None, "--end"),
     as_of: Optional[str] = typer.Option(None, "--as-of"),
+    board_type: Optional[str] = typer.Option(None, "--board-type"),
+    board_code: Optional[str] = typer.Option(None, "--board-code"),
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
 ) -> None:
     """Synchronize a dataset into the live repository."""
@@ -75,6 +77,13 @@ def sync_dataset(
     elif dataset == "daily":
         trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
         result = sync.sync_daily(trade_date)
+    elif dataset == "memberships":
+        if not as_of or not board_type or not board_code:
+            raise typer.BadParameter(
+                "memberships requires --as-of, --board-type and --board-code"
+            )
+        signal_time = datetime.fromisoformat(as_of)
+        result = sync.sync_board_memberships(board_type, board_code, signal_time)
     else:
         raise typer.BadParameter(f"unsupported dataset: {dataset}")
     typer.echo(json.dumps({

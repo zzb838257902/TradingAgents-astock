@@ -911,6 +911,114 @@ class MarketDataRepository:
             values,
         )
 
+    def upsert_board_definitions(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["board_type"],
+                row["board_code"],
+                row["name"],
+                row["pit_level"],
+                row["source"],
+                row["available_at"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO board_definitions
+               (board_type, board_code, name, pit_level, source, available_at,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def get_board_definition(
+        self, board_type: str, board_code: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """SELECT board_type, board_code, name, pit_level, source, available_at
+               FROM board_definitions
+               WHERE board_type = ? AND board_code = ?
+               ORDER BY available_at DESC
+               LIMIT 1""",
+            [board_type, board_code],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [
+            "board_type", "board_code", "name", "pit_level", "source", "available_at",
+        ]
+        return dict(zip(columns, row))
+
+    def upsert_board_memberships(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["board_type"],
+                row["board_code"],
+                row["symbol"],
+                row["membership_mode"],
+                row.get("effective_from"),
+                row.get("effective_to"),
+                row.get("snapshot_date"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", datetime.now(tz=SHANGHAI)),
+                row.get("dataset_version_id"),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO board_memberships
+               (board_type, board_code, symbol, membership_mode, effective_from,
+                effective_to, snapshot_date, available_at, source, ingested_at,
+                dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def get_board_memberships(
+        self,
+        board_type: str,
+        board_code: str,
+        as_of: date,
+        available_before: datetime,
+    ) -> list:
+        from tradingagents.market_data.contracts import Membership, MembershipMode
+
+        rows = self.connection.execute(
+            """SELECT m.board_type, m.board_code, m.symbol, m.membership_mode,
+                      m.effective_from, m.effective_to, m.snapshot_date,
+                      m.available_at, m.source
+               FROM board_memberships m
+               LEFT JOIN dataset_versions v ON m.dataset_version_id = v.version_id
+               WHERE m.board_type = ?
+                 AND m.board_code = ?
+                 AND m.available_at <= ?
+                 AND (m.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+               ORDER BY m.symbol, m.effective_from""",
+            [board_type, board_code, available_before],
+        ).fetchall()
+        memberships = [
+            Membership(
+                board_type=row[0],
+                board_code=row[1],
+                symbol=row[2],
+                membership_mode=MembershipMode(row[3]),
+                effective_from=row[4],
+                effective_to=row[5],
+                snapshot_date=row[6],
+                available_at=row[7],
+                source=row[8],
+            )
+            for row in rows
+        ]
+        return [item for item in memberships if item.was_member_on(as_of)]
+
     def list_quality_events(self, dataset: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """SELECT event_id, dataset, version_id, rule, severity,

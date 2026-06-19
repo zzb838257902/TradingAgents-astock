@@ -214,6 +214,74 @@ class MarketDataSync:
             coverage_reports={"daily_completeness": coverage},
         )
 
+    def sync_board_memberships(
+        self,
+        board_type: str,
+        board_code: str,
+        as_of: datetime,
+        *,
+        board_name: str | None = None,
+    ) -> SyncResult:
+        dataset = "industry_members" if board_type == "industry" else "index_members"
+        probe = self._require_probe_dataset(dataset)
+        if probe is not None:
+            return probe
+        if board_type == "industry":
+            fetched = self.provider.get_industry_members(board_code, as_of)
+        elif board_type == "index":
+            fetched = self.provider.get_index_members(board_code, as_of)
+        else:
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.ERROR,
+                errors=[f"unsupported board_type {board_type}"],
+            )
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result(dataset, fetched)
+        memberships = fetched.data or []
+        self.repository.upsert_board_definitions([{
+            "board_type": board_type,
+            "board_code": board_code,
+            "name": board_name or board_code,
+            "pit_level": fetched.pit_level.value,
+            "source": fetched.source,
+            "available_at": fetched.available_at,
+        }])
+        rows = [
+            {
+                "board_type": item.board_type,
+                "board_code": item.board_code,
+                "symbol": item.symbol,
+                "membership_mode": item.membership_mode.value,
+                "effective_from": item.effective_from,
+                "effective_to": item.effective_to,
+                "snapshot_date": item.snapshot_date,
+                "available_at": item.available_at,
+                "source": item.source,
+            }
+            for item in memberships
+        ]
+        self.repository.upsert_board_memberships(rows)
+        self._save_snapshot(
+            dataset,
+            {"board_type": board_type, "board_code": board_code, "as_of": as_of.isoformat()},
+            [item.model_dump(mode="json") for item in memberships],
+        )
+        return SyncResult(
+            dataset=dataset,
+            status=SyncStatus.PUBLISHED,
+            coverage_reports={
+                "membership_count": CoverageReport(
+                    dataset=dataset,
+                    status="pass",
+                    numerator=len(rows),
+                    denominator=len(rows) or 1,
+                    threshold=0.0,
+                    ratio=1.0 if rows else 0.0,
+                ),
+            },
+        )
+
     def _require_probe_dataset(self, dataset: str) -> SyncResult | None:
         probe = self.repository.get_capability_probe()
         if probe is None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Sequence
 
 import pandas as pd
@@ -13,6 +13,7 @@ from tradingagents.market_data.contracts import (
     DataResult,
     DataStatus,
     Membership,
+    MembershipMode,
     PITLevel,
     ProviderCapability,
     SecurityRecord,
@@ -128,6 +129,49 @@ def map_daily_bars_frame(frame: pd.DataFrame, source: str) -> list[dict]:
             "available_at": datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
             "source": source,
         })
+    return rows
+
+
+def map_industry_members_frame(
+    frame: pd.DataFrame, board_code: str, source: str
+) -> list[Membership]:
+    rows: list[Membership] = []
+    for row in frame.to_dict(orient="records"):
+        in_date = _parse_tushare_date(row.get("in_date"))
+        if in_date is None:
+            continue
+        out_date = _parse_tushare_date(row.get("out_date"))
+        rows.append(Membership(
+            board_type="industry",
+            board_code=board_code,
+            symbol=denormalize_ts_code(str(row["con_code"])),
+            membership_mode=MembershipMode.EFFECTIVE_INTERVAL,
+            effective_from=in_date,
+            effective_to=out_date,
+            available_at=datetime.combine(in_date, time(9, 0), tzinfo=SHANGHAI),
+            source=source,
+        ))
+    return rows
+
+
+def map_index_members_frame(
+    frame: pd.DataFrame, board_code: str, source: str
+) -> list[Membership]:
+    rows: list[Membership] = []
+    for row in frame.to_dict(orient="records"):
+        trade_date = _parse_tushare_date(row.get("trade_date"))
+        if trade_date is None:
+            continue
+        rows.append(Membership(
+            board_type="index",
+            board_code=board_code,
+            symbol=denormalize_ts_code(str(row["con_code"])),
+            membership_mode=MembershipMode.EFFECTIVE_INTERVAL,
+            effective_from=trade_date,
+            effective_to=trade_date + timedelta(days=1),
+            available_at=datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
+            source=source,
+        ))
     return rows
 
 
@@ -359,16 +403,22 @@ class TushareProvider:
     def get_industry_members(
         self, code: str, as_of: datetime
     ) -> DataResult[list[Membership]]:
-        return DataResult(
-            data=None,
-            status=DataStatus.NOT_AVAILABLE_YET,
-            source=self.name,
-            as_of=ensure_aware_shanghai(as_of),
-            available_at=ensure_aware_shanghai(as_of),
-            run_time=datetime.now(tz=SHANGHAI),
-            pit_level=PITLevel.PIT_REQUIRED,
-            errors=["industry members sync not implemented in provider task 4.1"],
-        )
+        as_of = ensure_aware_shanghai(as_of)
+
+        def call() -> list[Membership]:
+            frame = self._query("index_member_all", index_code=code)
+            return map_industry_members_frame(frame, code, self.name)
+
+        result = self._wrap_call(call)
+        if result.data is None:
+            return result
+        rows = result.data
+        return result.model_copy(update={
+            "data": rows,
+            "as_of": as_of,
+            "available_at": as_of,
+            "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
+        })
 
     def get_concept_members(
         self, code: str, as_of: datetime
@@ -385,16 +435,26 @@ class TushareProvider:
         )
 
     def get_index_members(self, code: str, as_of: datetime) -> DataResult[list[Membership]]:
-        return DataResult(
-            data=None,
-            status=DataStatus.NOT_AVAILABLE_YET,
-            source=self.name,
-            as_of=ensure_aware_shanghai(as_of),
-            available_at=ensure_aware_shanghai(as_of),
-            run_time=datetime.now(tz=SHANGHAI),
-            pit_level=PITLevel.PIT_REQUIRED,
-            errors=["index members sync not implemented in provider task 4.1"],
-        )
+        as_of = ensure_aware_shanghai(as_of)
+
+        def call() -> list[Membership]:
+            frame = self._query(
+                "index_weight",
+                index_code=code,
+                trade_date=as_of.strftime("%Y%m%d"),
+            )
+            return map_index_members_frame(frame, code, self.name)
+
+        result = self._wrap_call(call)
+        if result.data is None:
+            return result
+        rows = result.data
+        return result.model_copy(update={
+            "data": rows,
+            "as_of": as_of,
+            "available_at": as_of,
+            "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
+        })
 
     def probe_capabilities(self) -> DataResult[list[ProviderCapability]]:
         run_time = datetime.now(tz=SHANGHAI)
