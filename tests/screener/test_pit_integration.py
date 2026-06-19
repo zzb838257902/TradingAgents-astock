@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from tradingagents.market_data.fixture_store import load_fixture_into_repository
+from tradingagents.market_data.market_hours import ensure_aware_shanghai
+from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.pipeline import run_fixture_backtest
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 FIXTURE_PATH = Path("tests/fixtures/screener/mvp_market.json")
@@ -53,12 +59,10 @@ def test_rejects_non_pit_required_dataset(base_fixture, config, tmp_path):
 
 
 def test_repository_filters_financials_by_available_at(base_fixture, tmp_path):
-    from tradingagents.market_data.fixture_store import load_fixture_into_repository
-    from tradingagents.market_data.repository import MarketDataRepository
 
     repo = MarketDataRepository(tmp_path / "market.duckdb")
     load_fixture_into_repository(repo, base_fixture)
-    before_pub = datetime(2025, 10, 29, tzinfo=timezone.utc)
-    after_pub = datetime(2025, 10, 31, tzinfo=timezone.utc)
+    before_pub = ensure_aware_shanghai(datetime(2025, 10, 28, 12, 0))
+    after_pub = ensure_aware_shanghai(datetime(2025, 10, 30, 12, 0))
     assert repo.get_financials(["600002"], before_pub) == []
     assert len(repo.get_financials(["600002"], after_pub)) == 1

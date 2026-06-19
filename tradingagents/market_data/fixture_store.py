@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 
 from tradingagents.market_data.contracts import SecurityRecord
+from tradingagents.market_data.market_hours import SHANGHAI, bar_available_at, ensure_aware_shanghai
 from tradingagents.market_data.repository import MarketDataRepository
 
 
 def _parse_available_at(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    return datetime.fromisoformat(value)
-
-
-def _bar_available_at(trade_date: date) -> datetime:
-    return datetime.combine(trade_date, time(15, 30), tzinfo=timezone.utc)
+        return ensure_aware_shanghai(value)
+    return ensure_aware_shanghai(datetime.fromisoformat(value))
 
 
 def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> None:
@@ -23,7 +20,7 @@ def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> N
     securities: list[SecurityRecord] = []
     for item in fixture["symbols"]:
         symbol = item["symbol"]
-        list_date = trading_dates[0]
+        list_date = date.fromisoformat(item["list_date"]) if item.get("list_date") else trading_dates[0]
         delist_date = None
         valid_to = None
         if item.get("delist_after"):
@@ -41,7 +38,7 @@ def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> N
             delist_date=delist_date,
             status="listed",
             st_flag=item.get("st_flag", False),
-            available_at=datetime.combine(list_date, time(9, 0), tzinfo=timezone.utc),
+            available_at=datetime.combine(list_date, time(9, 0), tzinfo=SHANGHAI),
             source="fixture",
         ))
     repo.upsert_security_records(securities)
@@ -59,7 +56,7 @@ def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> N
                 "close": bar["close"],
                 "volume": bar["volume"],
                 "amount": bar.get("amount", bar["close"] * bar["volume"]),
-                "available_at": _bar_available_at(trade_date),
+                "available_at": bar_available_at(trade_date),
                 "source": "fixture",
             })
     repo.upsert_daily_bars(daily_bars)
