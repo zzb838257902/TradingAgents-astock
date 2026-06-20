@@ -18,7 +18,7 @@ Default tests run fully offline against this catalog and `docs/data/data-capabil
 
 | Scenario | Purpose |
 |---|---|
-| `with_announcements` | Symbol with recent bulletin rows |
+| `with_announcements` | Symbol with recent bulletin rows (`datelist` layout) |
 | `no_announcements` | Legitimate `SUCCESS_EMPTY` |
 | `revised_announcement` | Financial `report_list` revision / updated publish metadata |
 | `pagination` | Page 2+ bulletin list differs from page 1 |

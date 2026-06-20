@@ -618,7 +618,13 @@ class FreeAStockProvider:
                 pit_level=PITLevel.PIT_REQUIRED,
                 errors=[exc.message],
             )
-        if status in {DataStatus.NETWORK_ERROR, DataStatus.RATE_LIMITED, DataStatus.ERROR}:
+        if status in {
+            DataStatus.NETWORK_ERROR,
+            DataStatus.RATE_LIMITED,
+            DataStatus.ERROR,
+            DataStatus.PARSE_ERROR,
+            DataStatus.HTTP_ERROR,
+        }:
             return _result(
                 None,
                 status=status,

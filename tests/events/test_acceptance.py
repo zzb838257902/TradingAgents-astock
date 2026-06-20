@@ -45,6 +45,7 @@ def test_accept_offline_and_recorded_contract_passes(tmp_path):
     assert report["exit_code"] == 0
     assert report["tiers"]["A_offline_fixture"] == "PASS"
     assert report["tiers"]["A_recorded_contract"] == "PASS"
+    assert report["tiers"]["B_live_smoke"] == "SKIP"
     required_steps = [
         step for step in report["steps"] if step["required"] and step["name"].startswith("offline_")
     ]
@@ -80,14 +81,18 @@ def test_accept_live_smoke_pass_or_blocked(tmp_path):
     if result.returncode == 0:
         assert report["status"] == "PASS"
         assert report["tiers"]["B_live_smoke"] == "PASS"
+        assert report["tiers"]["A_offline_fixture"] == "SKIP"
+        assert report["tiers"]["A_recorded_contract"] == "SKIP"
         live_steps = [s for s in report["steps"] if s["name"].startswith("live_") and s["required"]]
         assert all(step["ok"] for step in live_steps)
     else:
         assert report["status"] == "BLOCKED"
         assert report["exit_code"] == 2
         assert report["tiers"]["B_live_smoke"] == "BLOCKED"
+        assert report["tiers"]["A_offline_fixture"] == "SKIP"
         probe = next(s for s in report["steps"] if s["name"] == "live_network_probe")
         assert not probe["ok"]
+        assert "network blocked" in (probe.get("error") or "").lower()
 
 
 @pytest.mark.parametrize(

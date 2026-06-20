@@ -91,6 +91,8 @@ class EventSyncService:
                 DataStatus.NETWORK_ERROR,
                 DataStatus.RATE_LIMITED,
                 DataStatus.ERROR,
+                DataStatus.PARSE_ERROR,
+                DataStatus.HTTP_ERROR,
             }:
                 return EventSyncResult(
                     dataset="market_events",
@@ -112,6 +114,8 @@ class EventSyncService:
                 DataStatus.NETWORK_ERROR,
                 DataStatus.RATE_LIMITED,
                 DataStatus.ERROR,
+                DataStatus.PARSE_ERROR,
+                DataStatus.HTTP_ERROR,
             }:
                 return EventSyncResult(
                     dataset="market_events",

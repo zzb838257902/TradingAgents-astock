@@ -6,15 +6,21 @@ from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from tradingagents.market_data.contracts import DataStatus, PITLevel
 from tradingagents.market_data.providers.free_astock import FreeAStockProvider
 from tradingagents.market_data.providers.free_astock_sources import (
     ProviderFetchError,
+    count_sina_bulletin_detail_links,
     parse_sina_bulletin_html,
+    sina_bulletin_page_is_supplier_empty,
+    validate_sina_bulletin_parse,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SAMPLE_HTML = Path("tests/fixtures/events/sina_bulletin_sample.html").read_text(encoding="utf-8")
+DATELIST_HTML = Path("tests/fixtures/events/sina_bulletin_datelist_sample.html").read_text(encoding="utf-8")
 
 
 class _EventBackend:
@@ -56,6 +62,25 @@ def test_parse_sina_bulletin_html_extracts_rows():
     assert len(rows) == 2
     assert rows[0]["source_record_id"] == "900001"
     assert rows[1]["title"].startswith("关于收到")
+
+
+def test_parse_sina_bulletin_datelist_html_extracts_rows():
+    rows = parse_sina_bulletin_html(DATELIST_HTML, "600000")
+    assert len(rows) == count_sina_bulletin_detail_links(DATELIST_HTML)
+    assert rows[0]["published_date"] == date(2026, 6, 5)
+
+
+def test_validate_sina_bulletin_parse_errors_on_detail_links_without_rows():
+    html = DATELIST_HTML + '<a href="/corp/view/vCB_AllBulletinDetail.php?id=1">x</a>'
+    with pytest.raises(ProviderFetchError) as exc:
+        validate_sina_bulletin_parse(html, [])
+    assert exc.value.status == "parse_error"
+
+
+def test_sina_bulletin_supplier_empty_page():
+    html = "<html><body><div>no announcements here</div></body></html>"
+    assert sina_bulletin_page_is_supplier_empty(html) is True
+    validate_sina_bulletin_parse(html, [])
 
 
 def test_free_provider_fetch_announcements_offline():

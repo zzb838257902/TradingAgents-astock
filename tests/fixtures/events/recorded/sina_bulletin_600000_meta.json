@@ -3,10 +3,17 @@
   "symbol": "600000",
   "board": "sse_main",
   "scenario": "with_announcements",
+  "layout": "datelist",
   "desensitized": true,
   "full_text_saved": false,
-  "response_sha256": "8f88cbc9857c92d4a3b2c1d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3",
-  "fields_present": ["date", "title", "source_record_id", "url"],
+  "fixture_path": "tests/fixtures/events/sina_bulletin_datelist_sample.html",
+  "response_sha256": "31dfc375424309e30e3d77b0f8696684449b82afa4393bf2a9932443a921e4e3",
+  "fields_present": [
+    "date",
+    "title",
+    "source_record_id",
+    "url"
+  ],
   "time_precision": "date_only",
   "row_count": 30
 }

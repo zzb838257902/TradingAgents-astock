@@ -29,6 +29,8 @@ class DataStatus(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     RATE_LIMITED = "rate_limited"
     NETWORK_ERROR = "network_error"
+    PARSE_ERROR = "parse_error"
+    HTTP_ERROR = "http_error"
     DATA_QUALITY_FAILED = "data_quality_failed"
 
 

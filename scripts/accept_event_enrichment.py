@@ -37,6 +37,7 @@ MVP_FIXTURE = ROOT / "tests/fixtures/screener/mvp_market.json"
 EVENTS_FIXTURE = ROOT / "tests/fixtures/events/provider_events.json"
 RECORDED_DIR = ROOT / "tests/fixtures/events/recorded"
 SAMPLE_HTML = ROOT / "tests/fixtures/events/sina_bulletin_sample.html"
+DATELIST_HTML = ROOT / "tests/fixtures/events/sina_bulletin_datelist_sample.html"
 MATRIX_PATH = ROOT / "docs/data/data-capability-matrix.yaml"
 
 LIVE_SMOKE_SYMBOLS: dict[str, str] = {
@@ -104,9 +105,14 @@ class AcceptanceReport:
         duration_ms = (finished - self.started_at).total_seconds() * 1000
         required_failures = [s for s in self.steps if s.required and not s.ok]
         optional_failures = [s for s in self.steps if not s.required and not s.ok]
-        live_blocked = any(
-            s.name == "live_network_probe" and not s.ok
-            for s in self.steps
+        live_blocked = (
+            "live-smoke" in self.modes
+            and any(
+                s.name == "live_network_probe"
+                and not s.ok
+                and (s.error or "").lower().startswith("assertionerror: network blocked:")
+                for s in self.steps
+            )
         )
         offline_or_contract_fail = any(
             not s.ok and s.required and not s.name.startswith("live_")
@@ -144,38 +150,22 @@ class AcceptanceReport:
             failed_sources.extend(step.detail.get("failed_sources") or [])
             degradations.extend(step.detail.get("degradations") or [])
 
+        def _tier_status(mode: str, prefix: str, *, blocked: bool = False) -> str:
+            if mode not in self.modes:
+                return "SKIP"
+            relevant = [step for step in self.steps if step.name.startswith(prefix)]
+            if not relevant:
+                return "SKIP"
+            if blocked:
+                return "BLOCKED"
+            if any(not step.ok and step.required for step in relevant):
+                return "FAIL"
+            return "PASS"
+
         tiers = {
-            "A_offline_fixture": (
-                "PASS"
-                if not any(
-                    not s.ok and s.required
-                    for s in self.steps
-                    if s.name.startswith("offline_")
-                )
-                else "FAIL"
-            ),
-            "A_recorded_contract": (
-                "PASS"
-                if not any(
-                    not s.ok and s.required
-                    for s in self.steps
-                    if s.name.startswith("recorded_")
-                )
-                else ("SKIP" if "recorded-contract" not in self.modes else "FAIL")
-            ),
-            "B_live_smoke": (
-                "BLOCKED"
-                if live_blocked
-                else (
-                    "PASS"
-                    if not any(
-                        not s.ok and s.required
-                        for s in self.steps
-                        if s.name.startswith("live_")
-                    )
-                    else ("SKIP" if "live-smoke" not in self.modes else "FAIL")
-                )
-            ),
+            "A_offline_fixture": _tier_status("offline", "offline_"),
+            "A_recorded_contract": _tier_status("recorded-contract", "recorded_"),
+            "B_live_smoke": _tier_status("live-smoke", "live_", blocked=live_blocked),
             "C_formal_historical_backtest": "NOT_IN_SCOPE",
             "D_five_day_operations": "NOT_IN_SCOPE",
         }
@@ -537,7 +527,10 @@ def _offline_steps(report: AcceptanceReport, home_dir: Path) -> None:
 
 
 def _recorded_contract_steps(report: AcceptanceReport) -> None:
-    from tradingagents.market_data.providers.free_astock_sources import parse_sina_bulletin_html
+    from tradingagents.market_data.providers.free_astock_sources import (
+        count_sina_bulletin_detail_links,
+        parse_sina_bulletin_html,
+    )
 
     def catalog() -> dict[str, Any]:
         readme = (RECORDED_DIR / "README.md").read_text(encoding="utf-8")
@@ -578,14 +571,40 @@ def _recorded_contract_steps(report: AcceptanceReport) -> None:
     report.run_step("recorded_catalog", catalog)
 
     def parser_contract() -> dict[str, Any]:
-        html = SAMPLE_HTML.read_text(encoding="utf-8")
-        rows = parse_sina_bulletin_html(html, "600000")
-        if len(rows) < 1:
-            raise AssertionError("parser returned no rows")
-        required = {"published_date", "title", "source_record_id", "source_url"}
-        if not required <= set(rows[0]):
-            raise AssertionError(f"missing fields: {required - set(rows[0])}")
-        return {"row_count": len(rows), "fields_present": sorted(rows[0])}
+        table_html = SAMPLE_HTML.read_text(encoding="utf-8")
+        table_rows = parse_sina_bulletin_html(table_html, "600000")
+        if len(table_rows) < 1:
+            raise AssertionError("legacy table parser returned no rows")
+        datelist_html = DATELIST_HTML.read_text(encoding="utf-8")
+        datelist_rows = parse_sina_bulletin_html(datelist_html, "600000")
+        detail_links = count_sina_bulletin_detail_links(datelist_html)
+        if detail_links < 1:
+            raise AssertionError("datelist fixture must contain detail links")
+        if len(datelist_rows) != detail_links:
+            raise AssertionError(
+                f"expected {detail_links} datelist rows, parsed {len(datelist_rows)}"
+            )
+        mismatch_html = (
+            datelist_html
+            + '<a href="/corp/view/vCB_AllBulletinDetail.php?stockid=600000&id=1">x</a>'
+        )
+        try:
+            from tradingagents.market_data.providers.free_astock_sources import (
+                ProviderFetchError,
+                validate_sina_bulletin_parse,
+            )
+
+            validate_sina_bulletin_parse(mismatch_html, [])
+        except ProviderFetchError as exc:
+            if exc.status != "parse_error":
+                raise AssertionError(f"expected parse_error, got {exc.status}") from exc
+        else:
+            raise AssertionError("parse mismatch must raise parse_error")
+        return {
+            "table_rows": len(table_rows),
+            "datelist_rows": len(datelist_rows),
+            "detail_links": detail_links,
+        }
 
     report.run_step("recorded_parser_contract", parser_contract)
 
@@ -618,16 +637,32 @@ def _live_smoke_steps(
     paths = MarketDataPaths(home_dir=home_dir)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
 
+    def _raise_fetch_error(exc: ProviderFetchError) -> None:
+        if exc.status == "network_error":
+            raise AssertionError(f"network blocked: {exc.message}") from exc
+        raise AssertionError(f"{exc.status}: {exc.message}") from exc
+
     def probe_network() -> dict[str, Any]:
         nonlocal report
         try:
             rows = backend.fetch_sina_bulletin_rows("600000", page=1)
         except ProviderFetchError as exc:
-            raise AssertionError(f"live network blocked: {exc.message}") from exc
+            _raise_fetch_error(exc)
         report.request_count += 1
+        if len(rows) < 1:
+            raise AssertionError("600000 page 1 must contain bulletin rows")
+        page2_rows = backend.fetch_sina_bulletin_rows("600000", page=2)
+        report.request_count += 1
+        if len(page2_rows) < 1:
+            raise AssertionError("600000 page 2 must contain bulletin rows")
+        page1_ids = {row["source_record_id"] for row in rows}
+        page2_ids = {row["source_record_id"] for row in page2_rows}
+        if page1_ids == page2_ids:
+            raise AssertionError("600000 page 1 and page 2 must not be identical")
         return {
             "row_count": len(rows),
-            "data_status": DataStatus.OK.value if rows else DataStatus.SUCCESS_EMPTY.value,
+            "page2_row_count": len(page2_rows),
+            "data_status": DataStatus.OK.value,
         }
 
     probe = report.run_step("live_network_probe", probe_network, required=True)
@@ -652,9 +687,17 @@ def _live_smoke_steps(
             rows = backend.fetch_sina_bulletin_rows(symbol, page=1)
             report.request_count += 1
             page2_rows: list[dict[str, Any]] = []
-            if symbol == "600000" and rows:
+            if symbol == "600000":
+                if len(rows) < 1:
+                    raise AssertionError("600000 page 1 must contain bulletin rows")
                 page2_rows = backend.fetch_sina_bulletin_rows(symbol, page=2)
                 report.request_count += 1
+                if len(page2_rows) < 1:
+                    raise AssertionError("600000 page 2 must contain bulletin rows")
+                page1_ids = {row["source_record_id"] for row in rows}
+                page2_ids = {row["source_record_id"] for row in page2_rows}
+                if page1_ids == page2_ids:
+                    raise AssertionError("600000 pagination must differ between pages")
             status = DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY
             board_results[board] = {
                 "symbol": symbol,
@@ -665,7 +708,8 @@ def _live_smoke_steps(
             }
             return board_results[board]
         except ProviderFetchError as exc:
-            raise AssertionError(f"{symbol}@{board}: {exc.message}") from exc
+            _raise_fetch_error(exc)
+        raise AssertionError(f"{symbol}@{board}: fetch failed")
 
     for symbol, board in LIVE_SMOKE_SYMBOLS.items():
         report.run_step(
@@ -691,6 +735,10 @@ def _live_smoke_steps(
             version = repo.get_latest_published_version("market_events")
         if result.status == EventSyncStatus.ERROR:
             raise AssertionError("; ".join(result.errors or [result.status.value]))
+        if result.status == EventSyncStatus.BLOCKED:
+            raise AssertionError("; ".join(result.errors or ["blocked"]))
+        if result.status != EventSyncStatus.PUBLISHED:
+            raise AssertionError(f"unexpected sync status: {result.status.value}")
         return {
             "sync_status": result.status.value,
             "version_id": result.version_id,

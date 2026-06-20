@@ -353,8 +353,13 @@ class LiveFreeAStockSourceBackend:
         if response.status_code >= 400:
             raise ProviderFetchError("http_error", f"HTTP {response.status_code} for {code}")
         response.encoding = response.apparent_encoding or "gb2312"
+        html = response.text
         try:
-            return parse_sina_bulletin_html(response.text, code)
+            rows = parse_sina_bulletin_html(html, code)
+            validate_sina_bulletin_parse(html, rows)
+            return rows
+        except ProviderFetchError:
+            raise
         except Exception as exc:
             raise ProviderFetchError("parse_error", str(exc)) from exc
 
@@ -528,31 +533,98 @@ _BULLETIN_ROW_RE = re.compile(
     r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",
     re.IGNORECASE,
 )
+_BULLETIN_DATELIST_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\s*(?:&nbsp;|\u00a0|\s)+"
+    r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",
+    re.IGNORECASE,
+)
 _BULLETIN_ID_RE = re.compile(r"[?&]id=(\d+)", re.IGNORECASE)
+_BULLETIN_DETAIL_LINK_RE = re.compile(r"vCB_AllBulletinDetail\.php", re.IGNORECASE)
+_BULLETIN_DATELIST_CONTAINER_RE = re.compile(
+    r"""class=['"]datelist['"]""",
+    re.IGNORECASE,
+)
+_BULLETIN_DATELIST_ENTRY_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\s*(?:&nbsp;|\u00a0|\s)+<a[^>]+href=['\"][^'\"]+['\"]",
+    re.IGNORECASE,
+)
+
+
+def count_sina_bulletin_detail_links(html: str) -> int:
+    return len(_BULLETIN_DETAIL_LINK_RE.findall(html))
+
+
+def sina_bulletin_page_is_supplier_empty(html: str) -> bool:
+    if count_sina_bulletin_detail_links(html) > 0:
+        return False
+    if _BULLETIN_DATELIST_CONTAINER_RE.search(html):
+        return False
+    if _BULLETIN_DATELIST_ENTRY_RE.search(html):
+        return False
+    if _BULLETIN_ROW_RE.search(html):
+        return False
+    return True
+
+
+def _build_sina_bulletin_row(
+    date_str: str,
+    href: str,
+    title: str,
+    symbol: str,
+) -> dict[str, Any]:
+    record_id = ""
+    match = _BULLETIN_ID_RE.search(href)
+    if match:
+        record_id = match.group(1)
+    if not record_id:
+        record_id = hashlib.sha256(f"{href}|{title}".encode()).hexdigest()[:16]
+    if href.startswith("/"):
+        source_url = f"https://vip.stock.finance.sina.com.cn{href}"
+    else:
+        source_url = href
+    return {
+        "symbol": symbol,
+        "title": title.strip(),
+        "published_date": date.fromisoformat(date_str),
+        "source_record_id": record_id,
+        "source_url": source_url,
+        "source_version": "v1",
+    }
 
 
 def parse_sina_bulletin_html(html: str, symbol: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for date_str, href, title in _BULLETIN_ROW_RE.findall(html):
-        record_id = ""
-        match = _BULLETIN_ID_RE.search(href)
-        if match:
-            record_id = match.group(1)
-        if not record_id:
-            record_id = hashlib.sha256(f"{href}|{title}".encode()).hexdigest()[:16]
-        if href.startswith("/"):
-            source_url = f"https://vip.stock.finance.sina.com.cn{href}"
-        else:
-            source_url = href
-        rows.append({
-            "symbol": symbol,
-            "title": title.strip(),
-            "published_date": date.fromisoformat(date_str),
-            "source_record_id": record_id,
-            "source_url": source_url,
-            "source_version": "v1",
-        })
+    seen: set[tuple[str, str, str]] = set()
+    for pattern in (_BULLETIN_ROW_RE, _BULLETIN_DATELIST_RE):
+        for date_str, href, title in pattern.findall(html):
+            key = (date_str, href, title.strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(_build_sina_bulletin_row(date_str, href, title, symbol))
     return rows
+
+
+def validate_sina_bulletin_parse(html: str, rows: list[dict[str, Any]]) -> None:
+    detail_links = count_sina_bulletin_detail_links(html)
+    if detail_links > 0 and not rows:
+        raise ProviderFetchError(
+            "parse_error",
+            f"bulletin page contains {detail_links} detail links but parser returned 0 rows",
+        )
+    if rows:
+        return
+    if sina_bulletin_page_is_supplier_empty(html):
+        return
+    if _BULLETIN_DATELIST_ENTRY_RE.search(html) or _BULLETIN_ROW_RE.search(html):
+        raise ProviderFetchError(
+            "parse_error",
+            "bulletin page contains announcement markers but parser returned 0 rows",
+        )
+    raise ProviderFetchError(
+        "parse_error",
+        "bulletin page is not a recognized supplier-empty response",
+    )
 
 
 def _normalize_event_symbol(symbol: str) -> str:
