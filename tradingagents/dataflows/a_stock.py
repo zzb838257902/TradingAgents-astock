@@ -348,6 +348,49 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
     return df
 
 
+def _supplement_kline_from_sina(
+    df: pd.DataFrame,
+    code: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[pd.DataFrame, bool]:
+    """Fill in-range mootdx gaps with Sina daily bars."""
+    if df is None or df.empty:
+        return df, False
+    try:
+        sina_df = _sina_kline_fallback(code, start_date, end_date)
+    except Exception as exc:
+        logger.debug("sina gap fill skipped for %s: %s", code, exc)
+        return df, False
+    if sina_df.empty:
+        return df, False
+
+    base = df.copy()
+    base["Date"] = pd.to_datetime(base["Date"])
+    sina_df = sina_df.copy()
+    sina_df["Date"] = pd.to_datetime(sina_df["Date"])
+    have = set(base["Date"].dt.normalize())
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    extra = sina_df[
+        (sina_df["Date"] >= start_dt)
+        & (sina_df["Date"] <= end_dt)
+        & (~sina_df["Date"].dt.normalize().isin(have))
+    ]
+    if extra.empty:
+        return base, False
+    if "Amount" not in extra.columns:
+        extra = extra.assign(Amount=0.0)
+    if "Amount" not in base.columns:
+        base = base.assign(Amount=0.0)
+    combined = pd.concat(
+        [base, extra[["Date", "Open", "High", "Low", "Close", "Volume", "Amount"]]],
+        ignore_index=True,
+    )
+    combined = combined.sort_values("Date").reset_index(drop=True)
+    return combined, True
+
+
 # ---------------------------------------------------------------------------
 # OHLCV loading with cache (mootdx -> CSV)
 # ---------------------------------------------------------------------------
@@ -482,6 +525,13 @@ def get_stock_data(
             f"No data found for A-stock '{code}' "
             f"between {start_date} and {end_date}"
         )
+
+    if data_source == "mootdx (TCP)":
+        df, supplemented = _supplement_kline_from_sina(
+            df, code, start_date, end_date
+        )
+        if supplemented:
+            data_source = "mootdx+sina HTTP"
 
     for col in ["Open", "High", "Low", "Close"]:
         if col in df.columns:

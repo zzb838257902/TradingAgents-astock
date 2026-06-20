@@ -83,6 +83,7 @@ def _run(
 
 def _seed_smoke_securities(
     home_dir: Path,
+    backfill_start: str,
     screening_date: str,
     symbols: tuple[str, ...],
 ) -> dict:
@@ -98,6 +99,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 LEGACY_LIST_DATE = date(1990, 1, 1)
 symbols = {symbols!r}
 screening = date.fromisoformat({screening_date!r})
+backfill = date.fromisoformat({backfill_start!r})
 backend = LiveFreeAStockSourceBackend()
 rows = {{row["symbol"]: row for row in backend.list_mootdx_stocks()}}
 paths = MarketDataPaths(home_dir={str(home_dir)!r})
@@ -123,8 +125,12 @@ for symbol in symbols:
         source="free_astock",
     ))
 repo.upsert_security_records(records)
-repo.seed_security_snapshot_for_date(screening)
-print(len(records))
+open_days = backend.fetch_sse_trade_dates(backfill, screening)
+if not open_days:
+    open_days = [screening]
+for snap in open_days:
+    repo.seed_security_snapshot_for_date(snap)
+print(len(records), len(open_days))
 """
     return _run(
         [sys.executable, "-c", script],
@@ -230,6 +236,7 @@ def main() -> int:
             "tests/market_data/test_free_astock_sources.py",
             "tests/market_data/test_sync_free_provider.py",
             "tests/market_data/test_sync_probe_decoupling.py",
+            "tests/market_data/test_a_stock_kline_merge.py",
             "tests/market_data/test_sync_coverage_gates.py",
             "tests/market_data/test_security_snapshots.py",
             "tests/market_data/test_adjustments.py",
@@ -271,7 +278,9 @@ def main() -> int:
         if args.smoke:
             step(
                 "smoke_seed_securities",
-                _seed_smoke_securities(live_home, screening_date, SMOKE_SYMBOLS),
+                _seed_smoke_securities(
+                    live_home, backfill_start, screening_date, SMOKE_SYMBOLS
+                ),
             )
 
         symbol_flag = ["--symbols", smoke_symbols] if args.smoke else []
