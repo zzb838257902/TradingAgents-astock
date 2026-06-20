@@ -222,22 +222,48 @@ def test_trade_calendar_range_report_passes_weekend_start():
     assert report.details[0]["covers_end"] is True
 
 
-def test_trade_calendar_range_report_passes_holiday_start_with_reference_calendar():
+def test_trade_calendar_range_report_passes_in_range_start_with_reference_calendar():
     reference = [
         date(2026, 1, 2),
         date(2026, 1, 5),
         date(2026, 1, 30),
     ]
     report = build_trade_calendar_range_report(
-        date(2026, 1, 1),
-        date(2026, 1, 31),
+        date(2026, 1, 3),
+        date(2026, 1, 30),
         reference,
         source_limit_bars=800,
         reference_open_dates=reference,
     )
     assert report.status == "pass"
-    assert report.details[0]["effective_start"] == "2026-01-02"
+    assert report.details[0]["effective_start"] == "2026-01-05"
     assert report.details[0]["effective_end"] == "2026-01-30"
+
+
+def test_reference_calendar_does_not_hide_backward_extension_gap():
+    reference = [date(2025, 1, 2), date(2025, 1, 3)]
+    report = build_trade_calendar_range_report(
+        date(2023, 1, 2),
+        date(2025, 1, 3),
+        reference,
+        reference_open_dates=reference,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["effective_start"] == "2023-01-02"
+    assert report.details[0]["covers_start"] is False
+
+
+def test_reference_calendar_does_not_hide_forward_extension_gap():
+    reference = [date(2026, 1, 2), date(2026, 1, 26)]
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 2),
+        date(2026, 1, 30),
+        reference,
+        reference_open_dates=reference,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["effective_end"] == "2026-01-30"
+    assert report.details[0]["covers_end"] is False
 
 
 def test_trade_calendar_range_report_blocks_weekday_without_reference_calendar():
@@ -271,7 +297,7 @@ def test_trade_calendar_range_report_end_bound_uses_reference_calendar():
     ]
     report = build_trade_calendar_range_report(
         date(2026, 1, 2),
-        date(2026, 1, 28),
+        date(2026, 1, 26),
         reference,
         reference_open_dates=reference,
     )

@@ -151,15 +151,29 @@ def effective_trade_calendar_end(requested_end: date) -> date:
     return candidate
 
 
+def _reference_open_bounds(
+    reference_open_dates: list[date],
+) -> tuple[date, date] | None:
+    if not reference_open_dates:
+        return None
+    return min(reference_open_dates), max(reference_open_dates)
+
+
 def effective_trade_calendar_start_bound(
     requested_start: date,
     *,
     reference_open_dates: list[date] | None = None,
 ) -> date:
     if reference_open_dates:
-        eligible = [day for day in reference_open_dates if day >= requested_start]
-        if eligible:
-            return min(eligible)
+        bounds = _reference_open_bounds(reference_open_dates)
+        if bounds is not None:
+            reference_min, reference_max = bounds
+            if reference_min <= requested_start <= reference_max:
+                eligible = [
+                    day for day in reference_open_dates if day >= requested_start
+                ]
+                if eligible:
+                    return min(eligible)
     return effective_trade_calendar_start(requested_start)
 
 
@@ -169,9 +183,15 @@ def effective_trade_calendar_end_bound(
     reference_open_dates: list[date] | None = None,
 ) -> date:
     if reference_open_dates:
-        eligible = [day for day in reference_open_dates if day <= requested_end]
-        if eligible:
-            return max(eligible)
+        bounds = _reference_open_bounds(reference_open_dates)
+        if bounds is not None:
+            reference_min, reference_max = bounds
+            if reference_min <= requested_end <= reference_max:
+                eligible = [
+                    day for day in reference_open_dates if day <= requested_end
+                ]
+                if eligible:
+                    return max(eligible)
     return effective_trade_calendar_end(requested_end)
 
 
