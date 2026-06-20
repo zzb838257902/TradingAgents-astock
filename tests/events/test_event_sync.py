@@ -61,6 +61,28 @@ def test_event_sync_publishes_announcement_bundle(tmp_path):
     assert snapshots
 
 
+def test_event_sync_success_empty_publishes_empty_version(tmp_path):
+    paths = MarketDataPaths(home_dir=tmp_path)
+    repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    _seed_calendar(repo)
+
+    class _EmptyBackend(_EventBackend):
+        def fetch_sina_bulletin_rows(self, symbol: str, page: int = 1):
+            return []
+
+    provider = FreeAStockProvider(backend=_EmptyBackend())
+    service = EventSyncService(repo, provider, paths, backend=provider._backend)
+    result = service.sync_announcements(
+        ["600000"],
+        date(2026, 6, 1),
+        date(2026, 6, 30),
+    )
+    assert result.status == EventSyncStatus.PUBLISHED
+    assert result.run_id
+    assert result.version_id
+    assert repo.get_latest_published_version("market_events") is not None
+
+
 def test_event_sync_success_empty_does_not_block(tmp_path):
     paths = MarketDataPaths(home_dir=tmp_path)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)

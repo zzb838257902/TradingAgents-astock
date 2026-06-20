@@ -29,7 +29,8 @@ def _canonical_url(url: str) -> str:
 def _title_time_symbol_key(event: MarketEvent, links: tuple[EventSymbolLink, ...]) -> str:
     symbols = ",".join(sorted({link.symbol for link in links}))
     stamp = event.published_at.isoformat()
-    return f"{event.title.strip()}|{stamp}|{symbols}"
+    version = event.source_version or "v0"
+    return f"{event.title.strip()}|{stamp}|{symbols}|{version}"
 
 
 def deduplicate_event_bundles(bundles: list[EventBundle]) -> tuple[list[EventBundle], DedupStats]:

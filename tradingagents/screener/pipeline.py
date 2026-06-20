@@ -25,6 +25,7 @@ from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.event_enrichment import enrich_ranking_with_events
 from tradingagents.screener.factors import compute_momentum, compute_quality, rank_score
 from tradingagents.screener.models import CandidateInput
+from tradingagents.screener.models import PortfolioSuggestion
 from tradingagents.screener.portfolio import construct_portfolio
 from tradingagents.screener.report import (
     RunReport,
@@ -473,27 +474,39 @@ def run_screen(
                 **enrichment_kwargs,
             )
         scored_index = scored.set_index("symbol")
-        portfolio_rows = []
-        for symbol in enrichment.portfolio_ranking:
-            row = scored_index.loc[symbol]
-            portfolio_rows.append({
-                "symbol": symbol,
-                "industry": row["industry"],
-                "price": row["price"],
-                "avg_volume": row["avg_volume"],
-                "score": enrichment.portfolio_scores[symbol],
-            })
-        portfolio_input = pd.DataFrame(portfolio_rows)
-
-    portfolio = construct_portfolio(
-        portfolio_input,
-        portfolio_value=portfolio_value,
-        max_positions=config.portfolio.max_positions,
-        max_stock_weight=config.portfolio.max_stock_weight,
-        max_industry_weight=config.portfolio.max_industry_weight,
-        cash_buffer=config.portfolio.cash_buffer,
-        max_participation_rate=config.portfolio.max_participation_rate,
-    )
+        if not enrichment.portfolio_ranking:
+            portfolio = PortfolioSuggestion(positions=[], cash=float(portfolio_value))
+        else:
+            portfolio_rows = []
+            for symbol in enrichment.portfolio_ranking:
+                row = scored_index.loc[symbol]
+                portfolio_rows.append({
+                    "symbol": symbol,
+                    "industry": row["industry"],
+                    "price": row["price"],
+                    "avg_volume": row["avg_volume"],
+                    "score": enrichment.portfolio_scores[symbol],
+                })
+            portfolio_input = pd.DataFrame(portfolio_rows)
+            portfolio = construct_portfolio(
+                portfolio_input,
+                portfolio_value=portfolio_value,
+                max_positions=config.portfolio.max_positions,
+                max_stock_weight=config.portfolio.max_stock_weight,
+                max_industry_weight=config.portfolio.max_industry_weight,
+                cash_buffer=config.portfolio.cash_buffer,
+                max_participation_rate=config.portfolio.max_participation_rate,
+            )
+    else:
+        portfolio = construct_portfolio(
+            portfolio_input,
+            portfolio_value=portfolio_value,
+            max_positions=config.portfolio.max_positions,
+            max_stock_weight=config.portfolio.max_stock_weight,
+            max_industry_weight=config.portfolio.max_industry_weight,
+            cash_buffer=config.portfolio.cash_buffer,
+            max_participation_rate=config.portfolio.max_participation_rate,
+        )
 
     target_weights = _portfolio_target_weights(portfolio, portfolio_value)
     rounded_weights = {symbol: round(weight, 10) for symbol, weight in target_weights.items()}

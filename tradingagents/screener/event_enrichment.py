@@ -119,6 +119,15 @@ def _soft_tags_from_rows(rows: list[dict[str, str]]) -> list[SoftRiskTag]:
     return tags
 
 
+def _effective_revision_events(events: list[MarketEvent]) -> list[MarketEvent]:
+    superseded = {
+        event.supersedes_event_id
+        for event in events
+        if event.supersedes_event_id
+    }
+    return [event for event in events if event.event_id not in superseded]
+
+
 def _filter_events(
     events: list[MarketEvent],
     *,
@@ -223,6 +232,7 @@ def enrich_ranking_with_events(
         max_event_age_days=cfg.max_event_age_days,
         allow_current_only=allow_current_only,
     )
+    filtered_events = _effective_revision_events(filtered_events)
 
     events_by_symbol: dict[str, list[MarketEvent]] = {symbol: [] for symbol in candidates}
     if filtered_events:
@@ -296,6 +306,8 @@ def enrich_ranking_with_events(
         base_scores=base_scores,
         scored_results=scored_results,
     )
+    if candidates and not portfolio_ranking:
+        global_degradations.append("all_candidates_hard_risk_filtered")
 
     versions = _event_dataset_versions(repo, present_datasets)
     degradations = _merge_degradations(global_degradations, degradations_by_symbol)

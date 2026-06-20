@@ -67,6 +67,7 @@ def _event(
     pit_level: PITLevel = PITLevel.PIT_REQUIRED,
     source_record_id: str | None = None,
     source_version: str = "v1",
+    supersedes_event_id: str | None = None,
 ) -> MarketEvent:
     return MarketEvent(
         event_id=event_id,
@@ -83,6 +84,7 @@ def _event(
         sentiment=sentiment,
         severity=severity,
         announcement_date_source=AnnouncementDateSource.REPORTED,
+        supersedes_event_id=supersedes_event_id,
     )
 
 
@@ -390,6 +392,123 @@ def test_revision_events_both_readable_after_publish(tmp_path: Path):
     ])
     rows = repo.get_market_events(["600003"], _signal_time(fixture))
     assert {row["event_id"] for row in rows} == {"evt-old", "evt-new"}
+
+
+def test_revision_scoring_uses_latest_visible_version_only(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3)
+    db_path = tmp_path / "revision-score.duckdb"
+    run_screen(
+        fixture,
+        config,
+        db_path,
+        universe_request=UniverseRequest(
+            universe_type=UniverseType.ALL,
+            as_of=_signal_time(fixture),
+        ),
+    )
+    repo = MarketDataRepository(db_path)
+    available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
+    old = _event(
+        event_id="evt-old",
+        event_type=EventType.FINANCIAL_REPORT,
+        sentiment=EventSentiment.NEUTRAL,
+        available_at=available,
+        source_record_id="rev-1",
+        source_version="v1",
+    )
+    new = _event(
+        event_id="evt-new",
+        event_type=EventType.FINANCIAL_REPORT,
+        sentiment=EventSentiment.POSITIVE,
+        available_at=available,
+        source_record_id="rev-1",
+        source_version="v2",
+        supersedes_event_id="evt-old",
+    )
+    _publish_events(repo, [
+        (old, "600003", []),
+        (new, "600003", []),
+    ])
+    report = run_screen(
+        fixture,
+        config,
+        db_path,
+        reload=False,
+        universe_request=UniverseRequest(
+            universe_type=UniverseType.ALL,
+            as_of=_signal_time(fixture),
+        ),
+    )
+    contribution_ids = {
+        item["event_id"] for item in report.event_contributions.get("600003", [])
+    }
+    assert contribution_ids == {"evt-new"}
+
+
+def test_all_candidates_hard_risk_filtered_produces_all_cash_portfolio(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3, hard_risk_filter=True)
+    db_path = tmp_path / "all-hard.duckdb"
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    run_screen(fixture, config, db_path, universe_request=request)
+    repo = MarketDataRepository(db_path)
+    available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
+    bundles = []
+    for symbol in ("600001", "600002", "600003"):
+        bundles.append((
+            _event(
+                event_id=f"evt-delist-{symbol}",
+                event_type=EventType.ST_DELIST,
+                sentiment=EventSentiment.NEGATIVE,
+                available_at=available,
+                severity=EventSeverity.CRITICAL,
+            ),
+            symbol,
+            [],
+        ))
+    _publish_events(repo, bundles)
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
+    assert report.status == ScreeningStatus.OK
+    assert report.target_weights == {}
+    assert report.positions == 0
+    assert report.cash_weight == 1.0
+    assert "all_candidates_hard_risk_filtered" in report.event_degradations.get("__global__", [])
+
+
+def test_st_relief_does_not_trigger_hard_risk_exclusion(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3, hard_risk_filter=True)
+    db_path = tmp_path / "st-relief.duckdb"
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    run_screen(fixture, config, db_path, universe_request=request)
+    repo = MarketDataRepository(db_path)
+    available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
+    _publish_events(repo, [
+        (
+            MarketEvent(
+                event_id="evt-relief",
+                event_type=EventType.ST_DELIST,
+                title="关于撤销退市风险警示的公告",
+                published_at=available,
+                available_at=available,
+                source="fixture",
+                source_url="https://example.com/event",
+                source_record_id="relief-1",
+                source_version="v1",
+                content_hash="hash-relief",
+                pit_level=PITLevel.PIT_REQUIRED,
+                sentiment=EventSentiment.POSITIVE,
+                severity=EventSeverity.LOW,
+                announcement_date_source=AnnouncementDateSource.REPORTED,
+            ),
+            "600002",
+            [],
+        ),
+    ])
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
+    assert "600002" not in report.risk_flags
+    assert "600002" in report.target_weights
 
 
 def test_dataset_versions_only_populated_for_present_datasets(tmp_path: Path):

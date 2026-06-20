@@ -38,6 +38,11 @@ def test_infer_severity_marks_st_and_investigation_critical():
     assert infer_severity("关于收到重大行政处罚决定书", EventType.PENALTY) == EventSeverity.CRITICAL
 
 
+def test_infer_severity_treats_relief_announcements_as_low():
+    assert infer_severity("关于撤销退市风险警示的公告", EventType.ST_DELIST) == EventSeverity.LOW
+    assert infer_severity("关于终止调查的公告", EventType.INVESTIGATION) == EventSeverity.LOW
+
+
 def test_conservative_available_at_uses_next_open_day():
     available = conservative_available_at(
         date(2026, 6, 5),

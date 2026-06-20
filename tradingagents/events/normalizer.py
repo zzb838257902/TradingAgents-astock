@@ -53,6 +53,7 @@ _TYPE_RULES: tuple[tuple[re.Pattern[str], EventType], ...] = (
 
 _POSITIVE_HINTS = re.compile(r"增持|中标|回购|分红|利好|预增|增长")
 _NEGATIVE_HINTS = re.compile(r"减持|处罚|立案|亏损|预减|警示|违规|退市")
+_POSITIVE_RELIEF_HINTS = re.compile(r"撤销|解除|终止调查|终止|结案|不予立案|恢复上市|摘星|撤销退市")
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -105,6 +106,8 @@ def content_hash_for(title: str, source_record_id: str, source_url: str) -> str:
 
 
 def infer_severity(title: str, event_type: EventType) -> EventSeverity:
+    if _POSITIVE_RELIEF_HINTS.search(title):
+        return EventSeverity.LOW
     if event_type in {EventType.ST_DELIST, EventType.INVESTIGATION}:
         return EventSeverity.CRITICAL
     if event_type == EventType.PENALTY and re.search(r"重大|严重", title):

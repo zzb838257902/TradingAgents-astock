@@ -142,9 +142,29 @@ class EventSyncService:
         deduped, stats = deduplicate_event_bundles(bundles)
         if not deduped:
             if fetched.status == DataStatus.SUCCESS_EMPTY:
+                run_id = self.repository.begin_ingestion_run(
+                    "market_events",
+                    {
+                        "dataset": "official_announcements",
+                        "symbols": symbols,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                        "as_of": (as_of or datetime.now(tz=SHANGHAI)).isoformat(),
+                        "success_empty": True,
+                    },
+                )
+                self.repository.upsert_staging_event_bundle(
+                    run_id,
+                    events=[],
+                    links=[],
+                    tags=[],
+                )
+                version_id = self.repository.publish_event_bundle(run_id)
                 return EventSyncResult(
                     dataset="market_events",
                     status=EventSyncStatus.PUBLISHED,
+                    run_id=run_id,
+                    version_id=version_id,
                     dedup_stats=stats,
                 )
             return EventSyncResult(

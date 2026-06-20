@@ -20,7 +20,7 @@ from tradingagents.market_data.contracts import PITLevel
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
-def _event(event_id: str, record_id: str, title: str) -> MarketEvent:
+def _event(event_id: str, record_id: str, title: str, *, version: str = "v1") -> MarketEvent:
     published = datetime(2026, 5, 6, 16, 0, tzinfo=SHANGHAI)
     available = datetime(2026, 5, 7, 9, 30, tzinfo=SHANGHAI)
     return MarketEvent(
@@ -32,7 +32,7 @@ def _event(event_id: str, record_id: str, title: str) -> MarketEvent:
         source="free_astock",
         source_url=f"https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id={record_id}",
         source_record_id=record_id,
-        source_version="v1",
+        source_version=version,
         content_hash=f"hash-{event_id}",
         pit_level=PITLevel.PIT_REQUIRED,
         sentiment=EventSentiment.NEUTRAL,
@@ -73,6 +73,18 @@ def test_dedup_keeps_revision_with_new_source_version():
     kept, stats = deduplicate_event_bundles([first, _bundle(revised)])
     assert len(kept) == 2
     assert stats.physical_duplicates == 0
+
+
+def test_dedup_keeps_same_title_and_time_with_different_version():
+    title = "Same bulletin title"
+    first = _bundle(_event("evt-old", "rev-1", title, version="v1"))
+    revised = _event("evt-new", "rev-1", title, version="v2").model_copy(update={
+        "content_hash": "hash-new",
+        "supersedes_event_id": "evt-old",
+    })
+    kept, stats = deduplicate_event_bundles([first, _bundle(revised)])
+    assert len(kept) == 2
+    assert stats.semantic_duplicates == 0
 
 
 def test_dedup_counts_semantic_title_time_symbol_duplicates():
