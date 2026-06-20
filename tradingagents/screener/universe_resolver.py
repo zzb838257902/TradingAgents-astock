@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tradingagents.market_data.contracts import Membership, PITLevel
 from tradingagents.market_data.market_hours import ensure_aware_shanghai
 from tradingagents.market_data.repository import MarketDataRepository
+
+
+def normalize_board_query(text: str) -> str:
+    return text.strip().lower()
 
 
 class UniverseType(StrEnum):
@@ -80,11 +85,228 @@ _BOARD_TYPE_BY_UNIVERSE = {
     UniverseType.CONCEPT: "concept",
     UniverseType.INDEX: "index",
 }
+_UNIVERSE_BY_BOARD_TYPE = {value: key for key, value in _BOARD_TYPE_BY_UNIVERSE.items()}
+
+
+class GroupFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    values: tuple[str, ...] = ()
+    mode: Literal["any", "all"] = "any"
+
+
+class CompositeUniverseQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    industries: GroupFilter | None = None
+    concepts: GroupFilter | None = None
+    indices: GroupFilter | None = None
+    custom_symbols: tuple[str, ...] = ()
+    groups_combine: Literal["and", "or"] = "and"
+    as_of: datetime
+
+    @field_validator("as_of")
+    @classmethod
+    def _normalize_as_of(cls, value: datetime) -> datetime:
+        return ensure_aware_shanghai(value)
+
+
+class BoardMatchKind(StrEnum):
+    CODE = "code"
+    NAME = "name"
+    ALIAS = "alias"
+    FUZZY = "fuzzy"
+
+
+class BoardMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    board_type: str
+    board_code: str
+    name: str
+    match_kind: BoardMatchKind
+
+
+class BoardResolveResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    match: BoardMatch | None = None
+    candidates: list[BoardMatch] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.match is not None and not self.errors
+
+
+class BoardNameResolver:
+    def __init__(self, repository: MarketDataRepository):
+        self.repository = repository
+
+    def resolve(self, board_type: str, query: str) -> BoardResolveResult:
+        text = query.strip()
+        if not text:
+            return BoardResolveResult(errors=["empty board query"])
+
+        definition = self.repository.get_board_definition(board_type, text)
+        if definition is not None:
+            return BoardResolveResult(match=BoardMatch(
+                board_type=definition["board_type"],
+                board_code=definition["board_code"],
+                name=definition["name"],
+                match_kind=BoardMatchKind.CODE,
+            ))
+
+        exact_names = self.repository.find_boards_by_exact_name(board_type, text)
+        if len(exact_names) == 1:
+            row = exact_names[0]
+            return BoardResolveResult(match=BoardMatch(
+                board_type=row["board_type"],
+                board_code=row["board_code"],
+                name=row["name"],
+                match_kind=BoardMatchKind.NAME,
+            ))
+        if len(exact_names) > 1:
+            return BoardResolveResult(candidates=[
+                BoardMatch(
+                    board_type=row["board_type"],
+                    board_code=row["board_code"],
+                    name=row["name"],
+                    match_kind=BoardMatchKind.NAME,
+                )
+                for row in exact_names
+            ])
+
+        aliases = [
+            row for row in self.repository.lookup_board_aliases(normalize_board_query(text))
+            if row["board_type"] == board_type
+        ]
+        alias_codes = sorted({row["board_code"] for row in aliases})
+        if len(alias_codes) == 1:
+            definition = self.repository.get_board_definition(board_type, alias_codes[0])
+            if definition is not None:
+                return BoardResolveResult(match=BoardMatch(
+                    board_type=definition["board_type"],
+                    board_code=definition["board_code"],
+                    name=definition["name"],
+                    match_kind=BoardMatchKind.ALIAS,
+                ))
+        if len(alias_codes) > 1:
+            candidates: list[BoardMatch] = []
+            for board_code in alias_codes:
+                definition = self.repository.get_board_definition(board_type, board_code)
+                if definition is None:
+                    continue
+                candidates.append(BoardMatch(
+                    board_type=definition["board_type"],
+                    board_code=definition["board_code"],
+                    name=definition["name"],
+                    match_kind=BoardMatchKind.ALIAS,
+                ))
+            return BoardResolveResult(candidates=candidates)
+
+        fuzzy_rows = self.repository.search_board_candidates(board_type, text)
+        return BoardResolveResult(candidates=[
+            BoardMatch(
+                board_type=row["board_type"],
+                board_code=row["board_code"],
+                name=row["name"],
+                match_kind=BoardMatchKind.FUZZY,
+            )
+            for row in fuzzy_rows
+        ])
 
 
 class UniverseResolver:
     def __init__(self, repository: MarketDataRepository):
         self.repository = repository
+        self.board_names = BoardNameResolver(repository)
+
+    def resolve_composite(self, query: CompositeUniverseQuery) -> UniverseResolveResult:
+        as_of_date = query.as_of.date()
+        available_before = query.as_of
+        snapshot_error = self.repository.screening_security_snapshot_error(as_of_date)
+        if snapshot_error:
+            return UniverseResolveResult(
+                errors=[snapshot_error],
+                universe_type=UniverseType.ALL,
+            )
+
+        effective_symbols = {
+            record.symbol
+            for record in self.repository.get_effective_securities_for_screening(
+                as_of_date, available_before
+            )
+        }
+
+        symbol_groups: list[set[str]] = []
+        if query.custom_symbols:
+            requested = {symbol.strip() for symbol in query.custom_symbols if symbol.strip()}
+            symbol_groups.append(requested)
+
+        for board_type, group_filter in (
+            ("industry", query.industries),
+            ("concept", query.concepts),
+            ("index", query.indices),
+        ):
+            if group_filter is None or not group_filter.values:
+                continue
+            per_value_sets: list[set[str]] = []
+            for value in group_filter.values:
+                board_result = self.board_names.resolve(board_type, value)
+                if board_result.errors:
+                    return UniverseResolveResult(
+                        errors=board_result.errors,
+                        universe_type=UniverseType.ALL,
+                    )
+                if board_result.candidates and not board_result.is_resolved:
+                    labels = ", ".join(
+                        f"{item.name}({item.board_code})" for item in board_result.candidates
+                    )
+                    return UniverseResolveResult(
+                        errors=[f"ambiguous {board_type} query {value!r}: {labels}"],
+                        universe_type=UniverseType.ALL,
+                    )
+                if board_result.match is None:
+                    return UniverseResolveResult(
+                        errors=[f"{board_type} board {value!r} is not defined or not synced"],
+                        universe_type=UniverseType.ALL,
+                    )
+                universe_type = _UNIVERSE_BY_BOARD_TYPE[board_type]
+                resolved = self.resolve(UniverseRequest(
+                    universe_type=universe_type,
+                    universe_code=board_result.match.board_code,
+                    as_of=query.as_of,
+                ))
+                if not resolved.is_ok:
+                    return resolved
+                per_value_sets.append(set(resolved.symbols))
+
+            if not per_value_sets:
+                continue
+            if group_filter.mode == "all":
+                combined = set.intersection(*per_value_sets)
+            else:
+                combined: set[str] = set()
+                for item in per_value_sets:
+                    combined |= item
+            symbol_groups.append(combined)
+
+        if not symbol_groups:
+            return self.resolve(UniverseRequest(
+                universe_type=UniverseType.ALL,
+                as_of=query.as_of,
+            ))
+
+        if query.groups_combine == "or":
+            merged = set()
+            for item in symbol_groups:
+                merged |= item
+        else:
+            merged = set.intersection(*symbol_groups)
+
+        symbols = sorted(merged & effective_symbols)
+        return UniverseResolveResult(
+            symbols=symbols,
+            universe_type=UniverseType.ALL,
+            raw_member_count=len(merged),
+        )
 
     def resolve(self, request: UniverseRequest) -> UniverseResolveResult:
         errors = validate_universe_request(request)

@@ -1204,6 +1204,54 @@ class MarketDataRepository:
         columns = ["board_type", "board_code", "alias", "alias_normalized", "source"]
         return [dict(zip(columns, row)) for row in rows]
 
+    def list_board_definitions(self, board_type: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT board_type, board_code, name, pit_level, source, available_at
+               FROM board_definitions
+               WHERE board_type = ?
+               ORDER BY board_code""",
+            [board_type],
+        ).fetchall()
+        columns = [
+            "board_type", "board_code", "name", "pit_level", "source", "available_at",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def find_boards_by_exact_name(
+        self, board_type: str, name: str
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT board_type, board_code, name, pit_level, source, available_at
+               FROM board_definitions
+               WHERE board_type = ? AND name = ?
+               ORDER BY board_code""",
+            [board_type, name],
+        ).fetchall()
+        columns = [
+            "board_type", "board_code", "name", "pit_level", "source", "available_at",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def search_board_candidates(
+        self, board_type: str, query: str
+    ) -> list[dict[str, Any]]:
+        needle = f"%{query.strip()}%"
+        rows = self.connection.execute(
+            """SELECT DISTINCT d.board_type, d.board_code, d.name, d.pit_level,
+                      d.source, d.available_at
+               FROM board_definitions d
+               LEFT JOIN board_aliases a
+                 ON d.board_type = a.board_type AND d.board_code = a.board_code
+               WHERE d.board_type = ?
+                 AND (d.name LIKE ? OR a.alias LIKE ? OR a.alias_normalized LIKE ?)
+               ORDER BY d.board_code""",
+            [board_type, needle, needle, needle.lower()],
+        ).fetchall()
+        columns = [
+            "board_type", "board_code", "name", "pit_level", "source", "available_at",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
+
     def mark_ingestion_failed(self, run_id: str, error_summary: str) -> None:
         now = datetime.now(tz=SHANGHAI)
         self.connection.execute(

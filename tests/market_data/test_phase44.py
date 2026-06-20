@@ -9,6 +9,8 @@ from tradingagents.market_data.contracts import MembershipMode, PITLevel
 from tradingagents.market_data.fixture_store import load_fixture_into_repository
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.universe_resolver import (
+    BoardNameResolver,
+    BoardMatchKind,
     UniverseRequest,
     UniverseResolver,
     UniverseType,
@@ -190,3 +192,19 @@ def test_fixture_store_loads_board_memberships(tmp_path):
     )
     assert len(memberships) == 1
     assert memberships[0].symbol == "600001"
+
+
+def test_industry_board_resolves_by_exact_name(tmp_path):
+    repo = MarketDataRepository(tmp_path / "market.duckdb")
+    _seed_memberships(repo)
+    resolver = BoardNameResolver(repo)
+    result = resolver.resolve("industry", "电子")
+    assert result.is_resolved
+    assert result.match.match_kind == BoardMatchKind.NAME
+    universe = UniverseResolver(repo).resolve(UniverseRequest(
+        universe_type=UniverseType.INDUSTRY,
+        universe_code=result.match.board_code,
+        as_of=_signal_time(date(2026, 6, 1)),
+    ))
+    assert universe.is_ok
+    assert set(universe.symbols) == {"600001", "600002"}

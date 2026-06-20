@@ -83,10 +83,12 @@ def test_market_data_providers_are_not_required_to_implement_event_provider():
         "probe_capabilities",
     }
     event_methods = set(event_provider_methods())
-    for provider_cls in (FixtureProvider, FreeAStockProvider, TushareProvider):
+    for provider_cls in (FreeAStockProvider, TushareProvider):
         for method in phase4_methods:
             assert hasattr(provider_cls, method)
         assert not event_methods.issubset(set(dir(provider_cls)))
+    for method in phase4_methods:
+        assert hasattr(FixtureProvider, method)
 
 
 def test_event_provider_is_optional_protocol_not_base_class():

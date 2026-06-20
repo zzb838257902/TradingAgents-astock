@@ -13,7 +13,13 @@ from tradingagents.market_data.providers.fixture import FixtureProvider
 from tradingagents.market_data.providers.tushare import map_concept_members_frame
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
-from tradingagents.screener.universe_resolver import UniverseRequest, UniverseResolver, UniverseType
+from tradingagents.screener.universe_resolver import (
+    BoardMatchKind,
+    BoardNameResolver,
+    UniverseRequest,
+    UniverseResolver,
+    UniverseType,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -169,3 +175,29 @@ def test_sync_concept_memberships_from_fixture_provider(tmp_path):
     memberships = repo.get_board_memberships("concept", "BK1184.DC", date(2026, 1, 2), as_of)
     assert len(memberships) == 1
     assert memberships[0].symbol == "600001"
+
+
+def test_concept_board_alias_resolves_to_canonical_code(tmp_path):
+    repo = MarketDataRepository(tmp_path / "market.duckdb")
+    repo.upsert_board_definitions([{
+        "board_type": "concept",
+        "board_code": "BK1184.DC",
+        "name": "测试概念",
+        "pit_level": PITLevel.PIT_REQUIRED.value,
+        "source": "fixture",
+        "available_at": datetime(2025, 1, 1, 9, 0, tzinfo=SHANGHAI),
+    }])
+    repo.upsert_board_aliases([{
+        "board_type": "concept",
+        "board_code": "BK1184.DC",
+        "alias": "AI概念",
+        "alias_normalized": "ai概念",
+        "source": "fixture",
+    }])
+    resolver = BoardNameResolver(repo)
+    result = resolver.resolve("concept", "ai概念")
+    assert result.is_resolved
+    assert result.match.match_kind == BoardMatchKind.ALIAS
+    assert result.match.board_code == "BK1184.DC"
+    definition = repo.get_board_definition("concept", "BK1184.DC")
+    assert definition["name"] == "测试概念"

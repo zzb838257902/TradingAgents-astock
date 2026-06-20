@@ -5,6 +5,14 @@ from __future__ import annotations
 from datetime import date, datetime, time
 from typing import Sequence
 
+from tradingagents.events.contracts import (
+    AnnouncementDateSource,
+    EventQualityStatus,
+    EventSentiment,
+    EventSeverity,
+    EventType,
+    MarketEvent,
+)
 from tradingagents.market_data.contracts import (
     DataResult,
     DataStatus,
@@ -17,6 +25,7 @@ from tradingagents.market_data.contracts import (
 )
 from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai
 from tradingagents.market_data.pit import require_pit_required
+from tradingagents.market_data.sync_policy import live_snapshot_date_error
 
 
 def _parse_date(value: date | str) -> date:
@@ -334,4 +343,203 @@ class FixtureProvider:
             ingested_at=run_time,
             run_time=run_time,
             pit_level=PITLevel.PIT_REQUIRED,
+        )
+
+    def _event_run_time(self) -> datetime:
+        return datetime.now(tz=SHANGHAI)
+
+    def _scenario_status(self, dataset_key: str) -> DataStatus | None:
+        scenario = self._fixture.get("active_scenario")
+        if scenario == "network_error":
+            return DataStatus.NETWORK_ERROR
+        if scenario == "rate_limited":
+            return DataStatus.RATE_LIMITED
+        if scenario == "no_announcements" and dataset_key == "announcements":
+            return DataStatus.SUCCESS_EMPTY
+        return None
+
+    def _parse_market_event(self, payload: dict) -> MarketEvent:
+        return MarketEvent(
+            event_id=payload["event_id"],
+            event_type=EventType(payload["event_type"]),
+            title=payload["title"],
+            summary=payload.get("summary", ""),
+            published_at=_parse_available_at(payload["published_at"]),
+            available_at=(
+                _parse_available_at(payload["available_at"])
+                if payload.get("available_at")
+                else None
+            ),
+            source=payload.get("source", self.name),
+            source_url=payload.get("source_url", ""),
+            source_record_id=payload["source_record_id"],
+            source_version=payload.get("source_version", ""),
+            content_hash=payload["content_hash"],
+            pit_level=PITLevel(payload["pit_level"]),
+            sentiment=EventSentiment(payload.get("sentiment", "unknown")),
+            severity=EventSeverity(payload.get("severity", "medium")),
+            announcement_date_source=(
+                AnnouncementDateSource(payload["announcement_date_source"])
+                if payload.get("announcement_date_source")
+                else None
+            ),
+            quality_status=EventQualityStatus(payload.get("quality_status", "valid")),
+            supersedes_event_id=payload.get("supersedes_event_id"),
+            ingested_at=(
+                _parse_available_at(payload["ingested_at"])
+                if payload.get("ingested_at")
+                else None
+            ),
+        )
+
+    def _filter_fixture_events(
+        self,
+        dataset_key: str,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> list[MarketEvent]:
+        symbol_set = set(symbols)
+        events: list[MarketEvent] = []
+        for item in self._fixture.get("events", []):
+            if item.get("dataset") != dataset_key:
+                continue
+            item_symbols = set(item.get("symbols") or [])
+            if symbol_set and item_symbols and not (item_symbols & symbol_set):
+                continue
+            event = self._parse_market_event(item["event"])
+            published_date = event.published_at.date()
+            if published_date < start or published_date > end:
+                continue
+            events.append(event)
+        events.sort(key=lambda row: (row.published_at, row.event_id))
+        return events
+
+    def _event_result(
+        self,
+        *,
+        dataset_key: str,
+        data: list[MarketEvent] | None,
+        status: DataStatus,
+        pit_level: PITLevel,
+        errors: list[str] | None = None,
+    ) -> DataResult[list[MarketEvent]]:
+        run_time = self._event_run_time()
+        return DataResult(
+            data=data,
+            status=status,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            ingested_at=run_time,
+            run_time=run_time,
+            pit_level=pit_level,
+            errors=errors or [],
+        )
+
+    def probe_event_capabilities(self) -> DataResult[list[ProviderCapability]]:
+        run_time = self._event_run_time()
+        datasets = self._fixture.get("event_datasets", {})
+        capabilities: list[ProviderCapability] = []
+        for dataset_key, definition in datasets.items():
+            if not isinstance(definition, dict):
+                continue
+            capabilities.append(ProviderCapability(
+                dataset=definition.get("dataset", dataset_key),
+                endpoint=definition.get("endpoint", dataset_key),
+                permitted=True,
+                pit_level=PITLevel(definition.get("pit_level", PITLevel.PIT_REQUIRED.value)),
+                probed_at=run_time,
+            ))
+        return DataResult(
+            data=capabilities,
+            status=DataStatus.OK,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            ingested_at=run_time,
+            run_time=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+        )
+
+    def fetch_announcements(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> DataResult[list[MarketEvent]]:
+        return self._fetch_events("announcements", symbols, start, end)
+
+    def fetch_news(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> DataResult[list[MarketEvent]]:
+        return self._fetch_events("news", symbols, start, end)
+
+    def fetch_fund_flow_events(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+    ) -> DataResult[list[MarketEvent]]:
+        return self._fetch_events("fund_flow", symbols, trade_date, trade_date)
+
+    def fetch_hot_topics(self, trade_date: date) -> DataResult[list[MarketEvent]]:
+        pit_level = PITLevel.CURRENT_ONLY
+        definition = self._fixture.get("event_datasets", {}).get("hot_topics", {})
+        if isinstance(definition, dict) and definition.get("pit_level"):
+            pit_level = PITLevel(definition["pit_level"])
+        snapshot_error = live_snapshot_date_error(trade_date, dataset="event_hot_topics")
+        if snapshot_error:
+            return self._event_result(
+                dataset_key="hot_topics",
+                data=None,
+                status=DataStatus.ERROR,
+                pit_level=pit_level,
+                errors=[snapshot_error],
+            )
+        scenario_status = self._scenario_status("hot_topics")
+        if scenario_status is not None:
+            return self._event_result(
+                dataset_key="hot_topics",
+                data=[] if scenario_status == DataStatus.SUCCESS_EMPTY else None,
+                status=scenario_status,
+                pit_level=pit_level,
+                errors=[f"fixture scenario {self._fixture.get('active_scenario')}"],
+            )
+        events = self._filter_fixture_events("hot_topics", [], trade_date, trade_date)
+        return self._event_result(
+            dataset_key="hot_topics",
+            data=events,
+            status=DataStatus.OK if events else DataStatus.SUCCESS_EMPTY,
+            pit_level=pit_level,
+        )
+
+    def _fetch_events(
+        self,
+        dataset_key: str,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> DataResult[list[MarketEvent]]:
+        definition = self._fixture.get("event_datasets", {}).get(dataset_key, {})
+        pit_level = PITLevel.PIT_REQUIRED
+        if isinstance(definition, dict) and definition.get("pit_level"):
+            pit_level = PITLevel(definition["pit_level"])
+        scenario_status = self._scenario_status(dataset_key)
+        if scenario_status is not None:
+            return self._event_result(
+                dataset_key=dataset_key,
+                data=[] if scenario_status == DataStatus.SUCCESS_EMPTY else None,
+                status=scenario_status,
+                pit_level=pit_level,
+                errors=[f"fixture scenario {self._fixture.get('active_scenario')}"],
+            )
+        events = self._filter_fixture_events(dataset_key, symbols, start, end)
+        return self._event_result(
+            dataset_key=dataset_key,
+            data=events,
+            status=DataStatus.OK if events else DataStatus.SUCCESS_EMPTY,
+            pit_level=pit_level,
         )
