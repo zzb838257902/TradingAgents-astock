@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -202,6 +202,79 @@ def test_duplicate_stable_keys_rejected_in_staging(tmp_path):
     repo.upsert_staging_event_bundle(run_id, events=[first], links=[], tags=[])
     with pytest.raises(ValueError, match="duplicate stable event key"):
         repo.upsert_staging_event_bundle(run_id, events=[second], links=[], tags=[])
+
+
+def test_empty_bundle_hash_includes_query_params(tmp_path):
+    repo = MarketDataRepository(tmp_path / "market.duckdb")
+    first_run = repo.begin_ingestion_run(
+        "market_events",
+        {
+            "dataset": "official_announcements",
+            "symbols": ["600000"],
+            "start": "2026-06-01",
+            "end": "2026-06-30",
+            "success_empty": True,
+        },
+    )
+    repo.upsert_staging_event_bundle(first_run, events=[], links=[], tags=[])
+    first_version = repo.publish_event_bundle(first_run)
+
+    second_run = repo.begin_ingestion_run(
+        "market_events",
+        {
+            "dataset": "official_announcements",
+            "symbols": ["600001"],
+            "start": "2026-06-01",
+            "end": "2026-06-30",
+            "success_empty": True,
+        },
+    )
+    repo.upsert_staging_event_bundle(second_run, events=[], links=[], tags=[])
+    second_version = repo.publish_event_bundle(second_run)
+    assert first_version != second_version
+
+
+def test_success_empty_announcement_sync_requires_pit_coverage(tmp_path):
+    repo = MarketDataRepository(tmp_path / "market.duckdb")
+    signal_time = datetime(2025, 12, 18, 15, 30, tzinfo=SHANGHAI)
+    window_start = date(2025, 11, 18)
+    window_end = date(2025, 12, 18)
+
+    run_id = repo.begin_ingestion_run(
+        "market_events",
+        {
+            "dataset": "official_announcements",
+            "symbols": ["600000", "600001"],
+            "start": "2025-11-01",
+            "end": "2025-12-18",
+            "success_empty": True,
+        },
+    )
+    repo.upsert_staging_event_bundle(run_id, events=[], links=[], tags=[])
+    version_id = repo.publish_event_bundle(run_id)
+    repo.connection.execute(
+        "UPDATE dataset_versions SET published_at = ? WHERE version_id = ?",
+        [datetime(2025, 12, 18, 15, 0, tzinfo=SHANGHAI), version_id],
+    )
+
+    assert repo.has_success_empty_announcement_sync(
+        symbols=["600000", "600001"],
+        signal_time=signal_time,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    assert not repo.has_success_empty_announcement_sync(
+        symbols=["600000", "600001", "600002"],
+        signal_time=signal_time,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    assert not repo.has_success_empty_announcement_sync(
+        symbols=["600000"],
+        signal_time=datetime(2025, 12, 17, 15, 30, tzinfo=SHANGHAI),
+        window_start=window_start,
+        window_end=window_end,
+    )
 
 
 def test_board_aliases_do_not_change_board_definitions(tmp_path):

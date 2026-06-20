@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from tradingagents.events.contracts import (
@@ -210,16 +210,37 @@ def _build_rankings(
     return event_ranking, enhanced_ranking, enhanced_ranking, portfolio_scores
 
 
+def _announcement_query_window(
+    signal_time: datetime,
+    max_event_age_days: int,
+) -> tuple[date, date]:
+    signal = ensure_aware_shanghai(signal_time)
+    window_end = signal.date()
+    window_start = window_end - timedelta(days=max_event_age_days)
+    return window_start, window_end
+
+
 def _dataset_requirement_satisfied(
     repo: MarketDataRepository,
     dataset: EventDataset,
     present_datasets: set[EventDataset],
     candidates: list[str],
+    signal_time: datetime,
+    max_event_age_days: int,
 ) -> bool:
     if dataset in present_datasets:
         return True
     if dataset == EventDataset.OFFICIAL_ANNOUNCEMENTS:
-        return repo.has_success_empty_announcement_sync(candidates)
+        window_start, window_end = _announcement_query_window(
+            signal_time,
+            max_event_age_days,
+        )
+        return repo.has_success_empty_announcement_sync(
+            symbols=candidates,
+            signal_time=signal_time,
+            window_start=window_start,
+            window_end=window_end,
+        )
     return False
 
 
@@ -279,7 +300,12 @@ def enrich_ranking_with_events(
         global_degradations.append(historical_error)
     for flag_name, dataset in REQUIRED_DATASET_MAP.items():
         if getattr(cfg, flag_name) and not _dataset_requirement_satisfied(
-            repo, dataset, present_datasets, candidates,
+            repo,
+            dataset,
+            present_datasets,
+            candidates,
+            signal,
+            cfg.max_event_age_days,
         ):
             enrichment_errors.append(
                 f"required dataset {DATASET_REPORT_KEYS[dataset]} missing"
@@ -324,7 +350,13 @@ def enrich_ranking_with_events(
     if candidates and not portfolio_ranking:
         global_degradations.append("all_candidates_hard_risk_filtered")
 
-    versions = _event_dataset_versions(repo, present_datasets, candidates)
+    versions = _event_dataset_versions(
+        repo,
+        present_datasets,
+        candidates,
+        signal,
+        cfg.max_event_age_days,
+    )
     degradations = _merge_degradations(global_degradations, degradations_by_symbol)
 
     if enrichment_errors:
@@ -363,18 +395,27 @@ def _event_dataset_versions(
     repo: MarketDataRepository,
     present_datasets: set[EventDataset],
     candidates: list[str],
+    signal_time: datetime,
+    max_event_age_days: int,
 ) -> dict[str, dict[str, Any] | None]:
     version = repo.get_latest_published_version("market_events")
     versions = {
         DATASET_REPORT_KEYS[dataset]: (version if dataset in present_datasets else None)
         for dataset in EventDataset
     }
-    if (
-        version is not None
-        and EventDataset.OFFICIAL_ANNOUNCEMENTS not in present_datasets
-        and repo.has_success_empty_announcement_sync(candidates)
-    ):
-        versions[DATASET_REPORT_KEYS[EventDataset.OFFICIAL_ANNOUNCEMENTS]] = version
+    if EventDataset.OFFICIAL_ANNOUNCEMENTS not in present_datasets:
+        window_start, window_end = _announcement_query_window(
+            signal_time,
+            max_event_age_days,
+        )
+        empty_version = repo.find_success_empty_announcement_sync(
+            symbols=candidates,
+            signal_time=signal_time,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        if empty_version is not None:
+            versions[DATASET_REPORT_KEYS[EventDataset.OFFICIAL_ANNOUNCEMENTS]] = empty_version
     return versions
 
 

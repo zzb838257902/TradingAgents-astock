@@ -45,6 +45,19 @@ def _hash_payload(payload: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _parse_sync_window_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = str(value).strip()
+    if not text:
+        return None
+    return date.fromisoformat(text[:10])
+
+
 def _sanitize_request_params(params: dict[str, Any]) -> dict[str, Any]:
     redacted = {}
     for key, value in params.items():
@@ -1035,11 +1048,19 @@ class MarketDataRepository:
                ORDER BY event_id, tag_key""",
             [run_id],
         ).fetchall()
-        return _hash_payload({
+        payload: dict[str, Any] = {
             "events": [list(row) for row in event_rows],
             "links": [list(row) for row in link_rows],
             "tags": [list(row) for row in tag_rows],
-        })
+        }
+        if not event_rows:
+            row = self.connection.execute(
+                "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            if row is not None:
+                payload["params"] = json.loads(row[0])
+        return _hash_payload(payload)
 
     def _copy_staging_event_bundle(self, run_id: str, version_id: str) -> None:
         event_rows = self.connection.execute(
@@ -1447,14 +1468,65 @@ class MarketDataRepository:
             return None
         return json.loads(row[0])
 
-    def has_success_empty_announcement_sync(self, symbols: list[str] | None = None) -> bool:
-        params = self.get_latest_market_events_ingestion_params()
-        if not params or not params.get("success_empty"):
-            return False
-        if symbols is None:
-            return True
-        synced = {str(symbol) for symbol in (params.get("symbols") or [])}
-        return bool(synced.intersection(symbols))
+    def find_success_empty_announcement_sync(
+        self,
+        *,
+        symbols: list[str],
+        signal_time: datetime,
+        window_start: date,
+        window_end: date,
+    ) -> dict[str, Any] | None:
+        if not symbols:
+            return None
+        required = {str(symbol) for symbol in symbols}
+        rows = self.connection.execute(
+            """SELECT v.version_id, v.dataset, v.status, v.published_at,
+                      v.ingestion_run_id, v.content_hash, r.params_json
+               FROM dataset_versions v
+               INNER JOIN ingestion_runs r ON v.ingestion_run_id = r.run_id
+               WHERE v.dataset = 'market_events'
+                 AND v.status = 'PUBLISHED'
+                 AND v.published_at <= ?
+               ORDER BY v.published_at DESC""",
+            [signal_time],
+        ).fetchall()
+        for row in rows:
+            params = json.loads(row[6])
+            if not params.get("success_empty"):
+                continue
+            synced = {str(symbol) for symbol in (params.get("symbols") or [])}
+            if not required.issubset(synced):
+                continue
+            sync_start = _parse_sync_window_date(params.get("start"))
+            sync_end = _parse_sync_window_date(params.get("end"))
+            if sync_start is None or sync_end is None:
+                continue
+            if sync_start > window_start or sync_end < window_end:
+                continue
+            return {
+                "version_id": row[0],
+                "dataset": row[1],
+                "status": row[2],
+                "published_at": row[3],
+                "ingestion_run_id": row[4],
+                "content_hash": row[5],
+            }
+        return None
+
+    def has_success_empty_announcement_sync(
+        self,
+        *,
+        symbols: list[str],
+        signal_time: datetime,
+        window_start: date,
+        window_end: date,
+    ) -> bool:
+        return self.find_success_empty_announcement_sync(
+            symbols=symbols,
+            signal_time=signal_time,
+            window_start=window_start,
+            window_end=window_end,
+        ) is not None
 
     def save_raw_snapshot(
         self,

@@ -107,6 +107,33 @@ def _publish_events(repo, bundles: list[tuple[MarketEvent, str, list[dict]]]) ->
     repo.publish_event_bundle(run_id)
 
 
+def _publish_success_empty_announcements(
+    repo: MarketDataRepository,
+    *,
+    symbols: list[str],
+    start: str,
+    end: str,
+    published_at: datetime,
+) -> str:
+    run_id = repo.begin_ingestion_run(
+        "market_events",
+        {
+            "dataset": "official_announcements",
+            "symbols": symbols,
+            "start": start,
+            "end": end,
+            "success_empty": True,
+        },
+    )
+    repo.upsert_staging_event_bundle(run_id, events=[], links=[], tags=[])
+    version_id = repo.publish_event_bundle(run_id)
+    repo.connection.execute(
+        "UPDATE dataset_versions SET published_at = ? WHERE version_id = ?",
+        [published_at, version_id],
+    )
+    return version_id
+
+
 def _seed_candidate_events(repo) -> None:
     available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
     _publish_events(repo, [
@@ -516,23 +543,63 @@ def test_required_announcements_satisfied_by_success_empty_sync(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=3, require_announcements=True)
     db_path = tmp_path / "success-empty.duckdb"
-    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    signal = _signal_time(fixture)
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=signal)
     run_screen(fixture, config, db_path, universe_request=request)
     repo = MarketDataRepository(db_path)
-    run_id = repo.begin_ingestion_run(
-        "market_events",
-        {
-            "dataset": "official_announcements",
-            "symbols": ["600001", "600002", "600003"],
-            "success_empty": True,
-        },
+    _publish_success_empty_announcements(
+        repo,
+        symbols=["600001", "600002", "600003"],
+        start="2025-11-01",
+        end="2025-12-18",
+        published_at=datetime(2025, 12, 18, 15, 0, tzinfo=SHANGHAI),
     )
-    repo.upsert_staging_event_bundle(run_id, events=[], links=[], tags=[])
-    repo.publish_event_bundle(run_id)
     report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
     assert report.status == ScreeningStatus.OK
     assert not report.errors
     assert report.event_dataset_versions["official_announcements"] is not None
+
+
+def test_future_empty_sync_does_not_satisfy_historical_signal(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3, require_announcements=True)
+    db_path = tmp_path / "future-empty.duckdb"
+    signal = _signal_time(fixture)
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=signal)
+    run_screen(fixture, config, db_path, universe_request=request)
+    repo = MarketDataRepository(db_path)
+    _publish_success_empty_announcements(
+        repo,
+        symbols=["600001", "600002", "600003"],
+        start="2025-11-01",
+        end="2025-12-18",
+        published_at=datetime(2026, 6, 19, 10, 0, tzinfo=SHANGHAI),
+    )
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
+    assert report.status == ScreeningStatus.DATA_ERROR
+    assert "official_announcements missing" in " ".join(report.errors)
+    assert report.target_weights == {}
+
+
+def test_partial_candidate_coverage_empty_sync_fails(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3, require_announcements=True)
+    db_path = tmp_path / "partial-empty.duckdb"
+    signal = _signal_time(fixture)
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=signal)
+    run_screen(fixture, config, db_path, universe_request=request)
+    repo = MarketDataRepository(db_path)
+    _publish_success_empty_announcements(
+        repo,
+        symbols=["600001"],
+        start="2025-11-01",
+        end="2025-12-18",
+        published_at=datetime(2025, 12, 18, 15, 0, tzinfo=SHANGHAI),
+    )
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
+    assert report.status == ScreeningStatus.DATA_ERROR
+    assert "official_announcements missing" in " ".join(report.errors)
+    assert report.target_weights == {}
 
 
 def test_dataset_versions_only_populated_for_present_datasets(tmp_path: Path):
