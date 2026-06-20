@@ -13,6 +13,7 @@ from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.market_hours import SHANGHAI, post_close_signal_time
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync, SyncStatus
+from tradingagents.market_data.sync_policy import shanghai_today
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.live import build_fixture_from_repository
 from tradingagents.screener.pipeline import run_screen
@@ -127,23 +128,29 @@ def run_after_close(
                 errors.extend(probe.errors or ["capability probe failed"])
                 raise RuntimeError("; ".join(errors))
 
-            security = sync.sync_security_master(trade_date)
-            sync_steps["security_master"] = security.status.value
-            if security.status != SyncStatus.PUBLISHED:
-                errors.extend(security.errors or ["security_master sync failed"])
-                raise RuntimeError("; ".join(errors))
+            today = shanghai_today()
+            if trade_date == today:
+                security = sync.sync_security_master(today)
+                sync_steps["security_master"] = security.status.value
+                if security.status != SyncStatus.PUBLISHED:
+                    errors.extend(security.errors or ["security_master sync failed"])
+                    raise RuntimeError("; ".join(errors))
 
-            daily = sync.sync_daily(trade_date)
-            sync_steps["daily_bars"] = daily.status.value
-            if daily.status != SyncStatus.PUBLISHED:
-                errors.extend(daily.errors or ["daily_bars sync failed"])
-                raise RuntimeError("; ".join(errors))
+                daily = sync.sync_daily(today)
+                sync_steps["daily_bars"] = daily.status.value
+                if daily.status != SyncStatus.PUBLISHED:
+                    errors.extend(daily.errors or ["daily_bars sync failed"])
+                    raise RuntimeError("; ".join(errors))
 
-            financials = sync.sync_financials(signal_time)
-            sync_steps["financials"] = financials.status.value
-            if financials.status != SyncStatus.PUBLISHED:
-                errors.extend(financials.errors or ["financials sync failed"])
-                raise RuntimeError("; ".join(errors))
+                financials = sync.sync_financials(signal_time)
+                sync_steps["financials"] = financials.status.value
+                if financials.status != SyncStatus.PUBLISHED:
+                    errors.extend(financials.errors or ["financials sync failed"])
+                    raise RuntimeError("; ".join(errors))
+            else:
+                sync_steps["security_master"] = "skipped_historical_signal"
+                sync_steps["daily_bars"] = "skipped_historical_signal"
+                sync_steps["financials"] = "skipped_historical_signal"
 
         if fixture is None:
             resolved = UniverseResolver(repo).resolve(

@@ -13,14 +13,12 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_TRADE_DATE = "2026-01-02"
 SMOKE_SYMBOLS = ("600000", "000001")
-SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _resolve_live_dates(
@@ -51,7 +49,12 @@ def _resolve_live_dates(
     return snapshot.isoformat(), screening.isoformat(), backfill_start.isoformat()
 
 
-def _run(cmd: list[str], *, env: dict | None = None, clear_proxy: bool = False) -> dict:
+def _run(
+    cmd: list[str],
+    *,
+    env: dict | None = None,
+    clear_proxy: bool = False,
+) -> dict:
     merged = os.environ.copy()
     merged["PYTHONPATH"] = f"{ROOT / '.pip_packages'}:{ROOT}"
     if clear_proxy:
@@ -78,7 +81,11 @@ def _run(cmd: list[str], *, env: dict | None = None, clear_proxy: bool = False) 
     }
 
 
-def _seed_smoke_securities(home_dir: Path, snapshot_date: str, symbols: tuple[str, ...]) -> dict:
+def _seed_smoke_securities(
+    home_dir: Path,
+    screening_date: str,
+    symbols: tuple[str, ...],
+) -> dict:
     script = f"""
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
@@ -88,25 +95,27 @@ from tradingagents.market_data.providers.free_astock_sources import LiveFreeASto
 from tradingagents.market_data.repository import MarketDataRepository
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+LEGACY_LIST_DATE = date(1990, 1, 1)
 symbols = {symbols!r}
-snapshot = date.fromisoformat({snapshot_date!r})
+screening = date.fromisoformat({screening_date!r})
 backend = LiveFreeAStockSourceBackend()
 rows = {{row["symbol"]: row for row in backend.list_mootdx_stocks()}}
 paths = MarketDataPaths(home_dir={str(home_dir)!r})
 repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-available_at = datetime.combine(snapshot, time(9, 0), tzinfo=SHANGHAI)
 records = []
 for symbol in symbols:
     row = rows.get(symbol)
     if row is None:
         raise SystemExit(f"missing symbol {{symbol}} in mootdx list")
+    list_date = row.get("list_date") or LEGACY_LIST_DATE
+    available_at = datetime.combine(list_date, time(9, 0), tzinfo=SHANGHAI)
     records.append(SecurityRecord(
         symbol=symbol,
         name=row["name"],
         board=row.get("board", "main"),
-        valid_from=snapshot,
+        valid_from=list_date,
         valid_to=None,
-        list_date=snapshot,
+        list_date=list_date,
         delist_date=None,
         status="L",
         st_flag=False,
@@ -114,7 +123,7 @@ for symbol in symbols:
         source="free_astock",
     ))
 repo.upsert_security_records(records)
-repo.seed_security_snapshot_for_date(snapshot)
+repo.seed_security_snapshot_for_date(screening)
 print(len(records))
 """
     return _run(
@@ -142,6 +151,12 @@ def main() -> int:
         "--smoke",
         action="store_true",
         help="with --live: 2-symbol fast path (implies MOOTDX_SKIP_BESTIP)",
+    )
+    parser.add_argument(
+        "--network-mode",
+        choices=("direct", "system"),
+        default="direct",
+        help="direct: clear proxy env vars; system: keep user proxy settings",
     )
     args = parser.parse_args()
     if args.smoke and not args.live:
@@ -172,6 +187,7 @@ def main() -> int:
         "fixture_trade_date": fixture_trade_date,
         "live": args.live,
         "smoke": args.smoke,
+        "network_mode": args.network_mode,
         "steps": [],
         "passed": True,
     }
@@ -214,6 +230,7 @@ def main() -> int:
             "tests/market_data/test_free_astock_sources.py",
             "tests/market_data/test_sync_free_provider.py",
             "tests/market_data/test_sync_probe_decoupling.py",
+            "tests/market_data/test_sync_coverage_gates.py",
             "tests/market_data/test_security_snapshots.py",
             "tests/market_data/test_adjustments.py",
             "tests/market_data/test_sync_policy.py",
@@ -238,7 +255,10 @@ def main() -> int:
             "TRADINGAGENTS_MARKET_DATA_PROVIDER": "free",
             "MOOTDX_SKIP_BESTIP": "1" if args.smoke else "",
         }
-        live_run = lambda cmd: _run(cmd, env=live_env, clear_proxy=True)
+        clear_proxy = args.network_mode == "direct"
+
+        def live_run(cmd: list[str]) -> dict:
+            return _run(cmd, env=live_env, clear_proxy=clear_proxy)
         step(
             "market_data_init_free",
             live_run([
@@ -251,7 +271,7 @@ def main() -> int:
         if args.smoke:
             step(
                 "smoke_seed_securities",
-                _seed_smoke_securities(live_home, snapshot_date, SMOKE_SYMBOLS),
+                _seed_smoke_securities(live_home, screening_date, SMOKE_SYMBOLS),
             )
 
         symbol_flag = ["--symbols", smoke_symbols] if args.smoke else []
@@ -334,16 +354,18 @@ def main() -> int:
             step(f"sync_{dataset_name}", live_run(dataset_cmd), required=required)
 
         if args.smoke:
+            scheduler_cmd = [
+                sys.executable, "-m", "tradingagents.scheduler.cli", "after-close",
+                "--trade-date", screening_date,
+                "--home-dir", str(live_home),
+                "--provider", "free",
+                "--universe", "custom",
+                "--symbols", smoke_symbols,
+                "--force",
+            ]
             step(
                 "scheduler_live_after_close",
-                live_run([
-                    sys.executable, "-m", "tradingagents.scheduler.cli", "after-close",
-                    "--trade-date", screening_date,
-                    "--home-dir", str(live_home),
-                    "--provider", "free",
-                    "--force",
-                ]),
-                required=False,
+                live_run(scheduler_cmd),
                 expect_status={"success"},
             )
 

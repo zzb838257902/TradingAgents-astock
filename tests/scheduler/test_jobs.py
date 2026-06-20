@@ -117,3 +117,41 @@ def test_non_trading_day_is_skipped(tmp_path):
     assert result.status == "skipped"
     assert result.report is not None
     assert result.report.status == ScreeningStatus.DATA_ERROR
+
+
+def test_after_close_skips_live_sync_for_historical_signal_date(tmp_path, monkeypatch):
+    sync, config, paths, fixture = _setup(tmp_path)
+    monkeypatch.setattr(
+        "tradingagents.scheduler.jobs.shanghai_today",
+        lambda: date(2026, 1, 5),
+    )
+    calls: list[str] = []
+
+    def _track(name: str):
+        def _wrapped(*_args, **_kwargs):
+            calls.append(name)
+            return __import__(
+                "tradingagents.market_data.sync",
+                fromlist=["SyncResult", "SyncStatus"],
+            ).SyncResult(dataset=name, status=__import__(
+                "tradingagents.market_data.sync",
+                fromlist=["SyncStatus"],
+            ).SyncStatus.PUBLISHED)
+
+        return _wrapped
+
+    sync.sync_security_master = _track("security_master")  # type: ignore[method-assign]
+    sync.sync_daily = _track("daily_bars")  # type: ignore[method-assign]
+    sync.sync_financials = _track("financials")  # type: ignore[method-assign]
+
+    result = run_after_close(
+        date(2026, 1, 2),
+        config,
+        paths,
+        sync,
+        force=True,
+    )
+    assert calls == []
+    assert result.sync_steps["security_master"] == "skipped_historical_signal"
+    assert result.sync_steps["daily_bars"] == "skipped_historical_signal"
+    assert result.sync_steps["financials"] == "skipped_historical_signal"

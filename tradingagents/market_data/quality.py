@@ -99,6 +99,61 @@ def build_daily_completeness_report(
     )
 
 
+def build_backfill_completeness_report(
+    bars: list[dict],
+    symbols: list[str],
+    open_dates: list[date],
+    threshold: float,
+) -> CoverageReport:
+    expected = {(symbol, day) for symbol in symbols for day in open_dates}
+    actual = {
+        (bar.get("symbol"), bar.get("trade_date"))
+        for bar in bars
+        if bar.get("symbol") is not None and bar.get("trade_date") is not None
+    }
+    numerator = len(expected & actual)
+    denominator = len(expected)
+    ratio = numerator / denominator if denominator else 0.0
+    status = "pass" if denominator and ratio >= threshold else "fail"
+    missing = sorted(expected - actual)
+    details = [
+        {
+            "symbol": symbol,
+            "trade_date": day.isoformat(),
+        }
+        for symbol, day in missing[:20]
+    ]
+    return CoverageReport(
+        dataset="daily_backfill_completeness",
+        status=status,
+        numerator=numerator,
+        denominator=denominator,
+        ratio=ratio,
+        threshold=threshold,
+        details=details,
+    )
+
+
+def build_financial_symbol_coverage_report(
+    rows: list[dict],
+    target_symbols: list[str],
+    threshold: float,
+) -> CoverageReport:
+    symbols_with_data = {row["symbol"] for row in rows if row.get("symbol")}
+    denominator = len(target_symbols)
+    numerator = len(symbols_with_data)
+    ratio = numerator / denominator if denominator else 0.0
+    status = "pass" if denominator and ratio >= threshold else "fail"
+    return CoverageReport(
+        dataset="financial_symbol_coverage",
+        status=status,
+        numerator=numerator,
+        denominator=denominator,
+        ratio=ratio,
+        threshold=threshold,
+    )
+
+
 def build_security_coverage_report(
     numerator: int,
     denominator: int,

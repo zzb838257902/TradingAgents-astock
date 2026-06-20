@@ -14,7 +14,9 @@ from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
     CoverageReport,
     assess_daily_bar_quality,
+    build_backfill_completeness_report,
     build_daily_completeness_report,
+    build_financial_symbol_coverage_report,
     build_security_coverage_report,
 )
 from tradingagents.market_data.financials import normalize_financial_row
@@ -25,6 +27,8 @@ from tradingagents.market_data.sync_policy import (
 )
 
 DAILY_COMPLETENESS_THRESHOLD = 0.995
+BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD = 1.0
+FINANCIAL_SYMBOL_COVERAGE_THRESHOLD = 0.0
 SECURITY_COVERAGE_THRESHOLD = 0.99
 
 
@@ -327,12 +331,50 @@ class MarketDataSync:
             bar["available_at"] = signal_available
             bar.setdefault("prev_close", bar.get("pre_close"))
             bar.setdefault("ingested_at", run_time)
+        if not bars:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=["daily backfill returned no bars"],
+            )
         issues = assess_daily_bar_quality(bars)
         if issues:
             return SyncResult(
                 dataset="daily_bars",
                 status=SyncStatus.BLOCKED,
                 errors=[issue.detail for issue in issues],
+            )
+        open_dates = [
+            day
+            for day in self.repository.list_open_trade_dates()
+            if start <= day <= end
+        ]
+        if not open_dates:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[f"no open trade dates between {start} and {end}"],
+            )
+        backfill_threshold = (
+            BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD
+            if symbols
+            else DAILY_COMPLETENESS_THRESHOLD
+        )
+        coverage = build_backfill_completeness_report(
+            bars,
+            target_symbols,
+            open_dates,
+            backfill_threshold,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "daily backfill coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"daily_backfill_completeness": coverage},
             )
         run_id = self.repository.begin_ingestion_run(
             "daily_bars",
@@ -352,6 +394,7 @@ class MarketDataSync:
             run_id=run_id,
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
+            coverage_reports={"daily_backfill_completeness": coverage},
         )
 
     def sync_board_memberships(
@@ -463,11 +506,34 @@ class MarketDataSync:
         if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
             return self._error_result("financials", fetched)
         rows = fetched.data or []
+        if not rows:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    f"no financial records returned for {len(target_symbols)} symbols"
+                ],
+            )
         open_dates = self.repository.list_open_trade_dates()
         normalized = [
             normalize_financial_row(row, open_dates=open_dates or None)
             for row in rows
         ]
+        coverage = build_financial_symbol_coverage_report(
+            normalized,
+            target_symbols,
+            FINANCIAL_SYMBOL_COVERAGE_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "financial symbol coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"financial_symbol_coverage": coverage},
+            )
         run_id = self.repository.begin_ingestion_run(
             "financials",
             {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
@@ -486,16 +552,7 @@ class MarketDataSync:
             run_id=run_id,
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
-            coverage_reports={
-                "financial_records": CoverageReport(
-                    dataset="financials",
-                    status="pass",
-                    numerator=len(normalized),
-                    denominator=len(normalized) or 1,
-                    threshold=0.0,
-                    ratio=1.0 if normalized else 0.0,
-                ),
-            },
+            coverage_reports={"financial_symbol_coverage": coverage},
         )
 
     def sync_adjustment_factors(
