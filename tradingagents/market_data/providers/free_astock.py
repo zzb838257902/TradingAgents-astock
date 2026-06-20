@@ -397,10 +397,14 @@ class FreeAStockProvider:
         run_time = datetime.now(tz=SHANGHAI)
         capabilities: list[ProviderCapability] = []
         errors: list[str] = []
-        sample_symbols = [
-            row["symbol"]
-            for row in self._backend.list_mootdx_stocks()[:1]
-        ]
+        sample_symbols: list[str] = []
+        try:
+            sample_symbols = [
+                row["symbol"]
+                for row in self._backend.list_mootdx_stocks()[:1]
+            ]
+        except Exception as exc:
+            errors.append(f"security_master: {exc}")
         try:
             open_dates = self._backend.fetch_sse_trade_dates(
                 date(1990, 1, 1),

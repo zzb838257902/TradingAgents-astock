@@ -79,8 +79,14 @@ def sync_dataset(
             raise typer.BadParameter("trade-calendar requires --start and --end")
         result = sync.sync_trade_calendar(date.fromisoformat(start), date.fromisoformat(end))
     elif dataset == "daily":
-        trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
-        result = sync.sync_daily(trade_date)
+        if start and end:
+            result = sync.sync_daily_backfill(
+                date.fromisoformat(start),
+                date.fromisoformat(end),
+            )
+        else:
+            trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
+            result = sync.sync_daily(trade_date)
     elif dataset == "memberships":
         if not as_of or not board_type or not board_code:
             raise typer.BadParameter(

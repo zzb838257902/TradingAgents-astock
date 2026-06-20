@@ -269,6 +269,76 @@ class MarketDataSync:
             coverage_reports={"daily_completeness": coverage},
         )
 
+    def sync_daily_backfill(
+        self,
+        start: date,
+        end: date,
+        *,
+        symbols: list[str] | None = None,
+    ) -> SyncResult:
+        """Backfill historical daily bars via get_daily_bars (mootdx/sina path)."""
+        probe = self._require_probe_dataset("daily_bars")
+        if probe is not None:
+            return probe
+        if end < start:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[f"backfill end {end} before start {start}"],
+            )
+        run_time = datetime.now(tz=SHANGHAI)
+        target_symbols = symbols
+        if not target_symbols:
+            target_symbols = [
+                row.symbol
+                for row in self.repository.get_effective_securities_for_screening(
+                    end,
+                    post_close_signal_time(end),
+                )
+            ]
+        if not target_symbols:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=["no symbols available for daily backfill; sync security-master first"],
+            )
+        fetched = self.provider.get_daily_bars(target_symbols, start, end)
+        if not fetched.is_usable_for_screening:
+            return self._error_result("daily_bars", fetched)
+        bars = fetched.data or []
+        for bar in bars:
+            trade_date = bar["trade_date"]
+            signal_available = post_close_signal_time(trade_date)
+            bar["available_at"] = signal_available
+            bar.setdefault("prev_close", bar.get("pre_close"))
+            bar.setdefault("ingested_at", run_time)
+        issues = assess_daily_bar_quality(bars)
+        if issues:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+        run_id = self.repository.begin_ingestion_run(
+            "daily_bars",
+            {
+                "mode": "backfill",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "symbol_count": len(target_symbols),
+            },
+        )
+        self.repository.upsert_staging_daily_bars(run_id, bars)
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("daily_bars")
+        return SyncResult(
+            dataset="daily_bars",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+        )
+
     def sync_board_memberships(
         self,
         board_type: str,

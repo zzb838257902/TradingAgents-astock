@@ -119,6 +119,17 @@ def test_create_tushare_provider_requires_token_when_probing():
     assert result.status == DataStatus.PERMISSION_DENIED
 
 
+def test_free_provider_probe_survives_mootdx_network_error():
+    class _FailingMootdxBackend(_MockBackend):
+        def list_mootdx_stocks(self) -> list[dict]:
+            raise OSError("No route to host")
+
+    provider = FreeAStockProvider(backend=_FailingMootdxBackend())
+    result = provider.probe_capabilities()
+    assert result.status == DataStatus.PARTIAL
+    assert any("security_master" in err for err in result.errors or [])
+
+
 def test_free_provider_probe_ok_with_mock_backend(monkeypatch):
     monkeypatch.setattr(
         "tradingagents.market_data.sync_policy.shanghai_today",

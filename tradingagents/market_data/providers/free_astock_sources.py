@@ -115,7 +115,7 @@ class LiveFreeAStockSourceBackend:
                     "invt": "2",
                     "fid": "f3",
                     "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                    "fields": "f2,f3,f5,f6,f12,f17,f18,f19",
+                    "fields": "f2,f5,f6,f12,f15,f16,f17,f18",
                 },
                 timeout=15,
             )
@@ -129,8 +129,9 @@ class LiveFreeAStockSourceBackend:
                     continue
                 close = float(item.get("f2") or 0.0)
                 open_ = float(item.get("f17") or close)
-                high = float(item.get("f18") or close)
-                low = float(item.get("f19") or close)
+                high = float(item.get("f15") or close)
+                low = float(item.get("f16") or close)
+                pre_close = float(item.get("f18") or close)
                 volume = float(item.get("f5") or 0.0)
                 amount = float(item.get("f6") or 0.0)
                 if amount <= 0:
@@ -144,7 +145,7 @@ class LiveFreeAStockSourceBackend:
                     "close": close,
                     "volume": volume,
                     "amount": amount,
-                    "pre_close": close,
+                    "pre_close": pre_close,
                     "available_at": _post_close_available_at(today),
                     "source": "free_astock",
                 })
