@@ -16,6 +16,7 @@ from tradingagents.market_data.quality import (
     assess_daily_bar_quality,
     build_backfill_completeness_report,
     build_daily_completeness_report,
+    build_financial_field_quality_report,
     build_financial_symbol_coverage_report,
     build_security_coverage_report,
 )
@@ -29,6 +30,7 @@ from tradingagents.market_data.sync_policy import (
 DAILY_COMPLETENESS_THRESHOLD = 0.995
 BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD = 1.0
 FINANCIAL_SYMBOL_COVERAGE_THRESHOLD = 0.0
+FINANCIAL_FIELD_QUALITY_THRESHOLD = 0.99
 SECURITY_COVERAGE_THRESHOLD = 0.99
 
 
@@ -534,6 +536,24 @@ class MarketDataSync:
                 ],
                 coverage_reports={"financial_symbol_coverage": coverage},
             )
+        field_quality = build_financial_field_quality_report(
+            normalized,
+            target_symbols,
+            FINANCIAL_FIELD_QUALITY_THRESHOLD,
+        )
+        if field_quality.status != "pass":
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "financial field quality below threshold: "
+                    f"{field_quality.ratio:.4f} < {field_quality.threshold}"
+                ],
+                coverage_reports={
+                    "financial_symbol_coverage": coverage,
+                    "financial_field_quality": field_quality,
+                },
+            )
         run_id = self.repository.begin_ingestion_run(
             "financials",
             {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
@@ -552,7 +572,10 @@ class MarketDataSync:
             run_id=run_id,
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
-            coverage_reports={"financial_symbol_coverage": coverage},
+            coverage_reports={
+                "financial_symbol_coverage": coverage,
+                "financial_field_quality": field_quality,
+            },
         )
 
     def sync_adjustment_factors(

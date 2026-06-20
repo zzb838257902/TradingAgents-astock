@@ -8,6 +8,12 @@ from typing import Any, Protocol
 
 import pandas as pd
 
+from tradingagents.market_data.financials import (
+    _EQUITY_KEYS,
+    _NET_PROFIT_KEYS,
+    _ROE_DIRECT_KEYS,
+    derive_roe,
+)
 from tradingagents.market_data.market_hours import SHANGHAI
 from tradingagents.market_data.sync_policy import shanghai_today
 
@@ -267,10 +273,16 @@ class LiveFreeAStockSourceBackend:
                 continue
             cash_row = _match_report_row(cashflow, report_period)
             balance_row = _match_report_row(balance, report_period)
+            net_profit = _float_field(income_row, _NET_PROFIT_KEYS)
             rows.append({
                 "symbol": code,
                 "report_period": report_period,
-                "roe": _float_field(income_row, ("净资产收益率", "roe", "ROE")),
+                "roe": derive_roe(
+                    direct_roe=_float_field(income_row, _ROE_DIRECT_KEYS),
+                    net_profit=net_profit,
+                    equity=_float_field(balance_row, _EQUITY_KEYS),
+                    report_period=report_period,
+                ),
                 "operating_cashflow": _float_field(
                     cash_row,
                     (
@@ -279,16 +291,7 @@ class LiveFreeAStockSourceBackend:
                         "MANANETR",
                     ),
                 ),
-                "net_profit": _float_field(
-                    income_row,
-                    (
-                        "净利润",
-                        "归属于母公司所有者的净利润",
-                        "归属于母公司的净利润",
-                        "NETPROFIT",
-                        "NETPARECOMPPROF",
-                    ),
-                ),
+                "net_profit": net_profit,
                 "debt_ratio": _debt_ratio(balance_row),
                 "announcement_date": announcement_date,
                 "available_at": available_at,

@@ -134,6 +134,50 @@ def build_backfill_completeness_report(
     )
 
 
+def build_financial_field_quality_report(
+    rows: list[dict],
+    target_symbols: list[str],
+    threshold: float,
+) -> CoverageReport:
+    from tradingagents.market_data.financials import (
+        financial_row_passes_quality_gate,
+        pick_latest_visible_financials,
+    )
+
+    latest = pick_latest_visible_financials(rows)
+    latest_by_symbol = {row["symbol"]: row for row in latest}
+    passing = [
+        symbol
+        for symbol in target_symbols
+        if symbol in latest_by_symbol
+        and financial_row_passes_quality_gate(latest_by_symbol[symbol])
+    ]
+    denominator = len(target_symbols)
+    numerator = len(passing)
+    ratio = numerator / denominator if denominator else 0.0
+    status = "pass" if denominator and ratio >= threshold else "fail"
+    failing = sorted(set(target_symbols) - set(passing))
+    details = [
+        {
+            "symbol": symbol,
+            "roe": latest_by_symbol.get(symbol, {}).get("roe"),
+            "net_profit": latest_by_symbol.get(symbol, {}).get("net_profit"),
+            "debt_ratio": latest_by_symbol.get(symbol, {}).get("debt_ratio"),
+        }
+        for symbol in failing[:20]
+    ]
+    return CoverageReport(
+        dataset="financial_field_quality",
+        status=status,
+        numerator=numerator,
+        denominator=denominator,
+        ratio=ratio,
+        threshold=threshold,
+        exclusions=failing,
+        details=details,
+    )
+
+
 def build_financial_symbol_coverage_report(
     rows: list[dict],
     target_symbols: list[str],
