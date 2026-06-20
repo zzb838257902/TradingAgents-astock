@@ -13,6 +13,43 @@ from tradingagents.market_data.sync_policy import shanghai_today
 
 _A_SHARE_CODE = re.compile(r"^[036]\d{5}$")
 
+_FALLBACK_MOOTDX_SERVERS: tuple[tuple[str, int], ...] = (
+    ("180.153.18.170", 7709),
+    ("180.153.18.171", 7709),
+    ("110.41.147.114", 7709),
+    ("124.70.176.52", 7709),
+)
+
+
+def _mootdx_quotes_client():
+    """Connect to mootdx HQ, falling back when bestip scan is blocked."""
+    from mootdx.quotes import Quotes
+
+    try:
+        return Quotes.factory(market="std", bestip=True, timeout=10)
+    except OSError:
+        pass
+    servers: list[tuple[str, int]] = list(_FALLBACK_MOOTDX_SERVERS)
+    try:
+        from mootdx.consts import HQ_HOSTS
+        from tdxpy.constants import hq_hosts
+
+        for host in hq_hosts[:12] + HQ_HOSTS[:8]:
+            servers.append((host[1], int(host[2])))
+    except Exception:
+        pass
+    seen: set[tuple[str, int]] = set()
+    last_error: Exception | None = None
+    for server in servers:
+        if server in seen:
+            continue
+        seen.add(server)
+        try:
+            return Quotes.factory(market="std", server=server, timeout=10)
+        except Exception as exc:
+            last_error = exc
+    raise OSError(f"unable to connect to mootdx HQ server: {last_error}")
+
 
 def _parse_yyyymmdd(value: Any) -> date | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -54,9 +91,7 @@ class LiveFreeAStockSourceBackend:
     """Production backend delegating to existing a_stock / mootdx integrations."""
 
     def list_mootdx_stocks(self) -> list[dict[str, Any]]:
-        from mootdx.quotes import Quotes
-
-        client = Quotes.factory(market="std", bestip=True, timeout=15)
+        client = _mootdx_quotes_client()
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for market in (0, 1):
@@ -249,9 +284,7 @@ class LiveFreeAStockSourceBackend:
         return rows
 
     def fetch_xdxr_frame(self, symbol: str) -> list[dict[str, Any]]:
-        from mootdx.quotes import Quotes
-
-        client = Quotes.factory(market="std", bestip=True, timeout=15)
+        client = _mootdx_quotes_client()
         frame = client.xdxr(symbol=symbol)
         if frame is None or frame.empty:
             return []
