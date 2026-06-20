@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from typing import Self
 
@@ -37,11 +39,42 @@ class PortfolioConfig(StrictModel):
     max_participation_rate: float = Field(default=0.05, gt=0, le=1)
 
 
+class EventEnrichmentConfig(StrictModel):
+    enabled: bool = False
+    candidate_limit: int = Field(default=100, ge=1)
+    max_event_age_days: int = Field(default=30, ge=1)
+    event_weight: float = Field(default=0.20, ge=0, le=1)
+    event_half_life_days: int = Field(default=7, ge=1)
+    hard_risk_filter: bool = True
+    require_announcements: bool = False
+    require_news: bool = False
+    require_fund_flow: bool = False
+
+
 class ScreenerConfig(StrictModel):
     home_dir: Path = Path("~/.tradingagents").expanduser()
     universe: UniverseConfig = UniverseConfig()
     strategy: StrategyConfig = StrategyConfig()
     portfolio: PortfolioConfig = PortfolioConfig()
+    event_enrichment: EventEnrichmentConfig = Field(default_factory=EventEnrichmentConfig)
+
+    @model_validator(mode="after")
+    def validate_event_candidate_limit(self) -> Self:
+        if self.event_enrichment.candidate_limit < self.portfolio.max_positions:
+            raise ValueError(
+                "event_enrichment.candidate_limit must be >= portfolio.max_positions"
+            )
+        return self
+
+    def stage4_model_dump(self) -> dict:
+        payload = self.model_dump(mode="json")
+        if not self.event_enrichment.enabled:
+            payload.pop("event_enrichment", None)
+        return payload
+
+    def stage4_config_hash(self) -> str:
+        payload = json.dumps(self.stage4_model_dump(), sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     @classmethod
     def from_yaml(cls, path: Path) -> "ScreenerConfig":

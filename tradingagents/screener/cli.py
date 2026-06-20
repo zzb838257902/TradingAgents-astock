@@ -23,8 +23,7 @@ app = typer.Typer(help="TradingAgents automatic stock screening MVP")
 
 
 def _config_hash(config: ScreenerConfig) -> str:
-    payload = config.model_dump_json()
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return config.stage4_config_hash()
 
 
 def _fixture_sha256(path: Path) -> str:

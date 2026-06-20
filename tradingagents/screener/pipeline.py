@@ -171,7 +171,22 @@ def run_screen(
         require_pit_required(fixture.get("datasets", {}).get("daily_bars", "pit_required"), "daily_bars")
         require_pit_required(fixture.get("datasets", {}).get("financials", "pit_required"), "financials")
     except ValueError as exc:
-        signal_time = datetime.now().astimezone()
+        trading_dates = sorted(
+            date.fromisoformat(trade_date)
+            for trade_date in fixture.get("bars", {})
+        )
+        signal_date = (
+            _resolve_signal_date(trading_dates)
+            if len(trading_dates) >= 2
+            else None
+        )
+        signal_time = (
+            post_close_signal_time(signal_date)
+            if signal_date is not None
+            else universe_request.as_of
+            if universe_request and universe_request.as_of is not None
+            else post_close_signal_time(date.today())
+        )
         request = universe_request or UniverseRequest(
             universe_type=UniverseType.ALL,
             as_of=signal_time,
