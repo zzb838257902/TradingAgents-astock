@@ -56,7 +56,7 @@ class LiveFreeAStockSourceBackend:
     def list_mootdx_stocks(self) -> list[dict[str, Any]]:
         from mootdx.quotes import Quotes
 
-        client = Quotes.factory(market="std")
+        client = Quotes.factory(market="std", bestip=True, timeout=15)
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for market in (0, 1):
@@ -250,7 +250,7 @@ class LiveFreeAStockSourceBackend:
     def fetch_xdxr_frame(self, symbol: str) -> list[dict[str, Any]]:
         from mootdx.quotes import Quotes
 
-        client = Quotes.factory(market="std")
+        client = Quotes.factory(market="std", bestip=True, timeout=15)
         frame = client.xdxr(symbol=symbol)
         if frame is None or frame.empty:
             return []
