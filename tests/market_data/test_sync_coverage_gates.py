@@ -209,21 +209,79 @@ def test_trade_calendar_range_report_blocks_early_start():
     assert report.details[0]["covers_start"] is False
 
 
-def test_trade_calendar_range_report_passes_holiday_start():
+def test_trade_calendar_range_report_passes_weekend_start():
     report = build_trade_calendar_range_report(
-        date(2026, 1, 1),
+        date(2026, 1, 3),
         date(2026, 1, 31),
-        [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 31)],
+        [date(2026, 1, 5), date(2026, 1, 31)],
         source_limit_bars=800,
     )
     assert report.status == "pass"
+    assert report.details[0]["effective_start"] == "2026-01-05"
     assert report.details[0]["covers_start"] is True
     assert report.details[0]["covers_end"] is True
 
 
-def test_trade_calendar_range_report_blocks_stale_end():
+def test_trade_calendar_range_report_passes_holiday_start_with_reference_calendar():
+    reference = [
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+        date(2026, 1, 30),
+    ]
     report = build_trade_calendar_range_report(
         date(2026, 1, 1),
+        date(2026, 1, 31),
+        reference,
+        source_limit_bars=800,
+        reference_open_dates=reference,
+    )
+    assert report.status == "pass"
+    assert report.details[0]["effective_start"] == "2026-01-02"
+    assert report.details[0]["effective_end"] == "2026-01-30"
+
+
+def test_trade_calendar_range_report_blocks_weekday_without_reference_calendar():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 30)],
+        source_limit_bars=800,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["covers_start"] is False
+
+
+def test_trade_calendar_range_report_blocks_supplier_gap_after_weekday_start():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 2),
+        date(2026, 1, 31),
+        [date(2026, 1, 8), date(2026, 1, 30)],
+        source_limit_bars=800,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["covers_start"] is False
+    assert report.details[0]["covers_end"] is True
+
+
+def test_trade_calendar_range_report_end_bound_uses_reference_calendar():
+    reference = [
+        date(2026, 1, 2),
+        date(2026, 1, 23),
+        date(2026, 1, 26),
+    ]
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 2),
+        date(2026, 1, 28),
+        reference,
+        reference_open_dates=reference,
+    )
+    assert report.status == "pass"
+    assert report.details[0]["effective_end"] == "2026-01-26"
+
+
+def test_trade_calendar_range_report_blocks_stale_end():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 2),
         date(2026, 1, 31),
         [date(2026, 1, 2), date(2026, 1, 5)],
         source_limit_bars=800,
@@ -242,6 +300,7 @@ def test_trade_calendar_range_report_empty_calendar_details():
     )
     assert report.status == "fail"
     assert "actual_start" not in report.details[0]
+    assert report.details[0]["effective_start"] == "2026-01-01"
     assert report.details[0]["effective_end"] == "2026-01-30"
 
 

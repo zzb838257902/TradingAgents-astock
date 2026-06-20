@@ -8,10 +8,6 @@ from typing import Any
 
 from tradingagents.market_data.financials import next_open_trading_day
 
-# Max calendar-day gap between requested_start and the first returned session
-# when treating the mismatch as a non-trading-day start (holiday/weekend).
-_MAX_NON_TRADING_START_GAP = timedelta(days=10)
-
 
 @dataclass(frozen=True)
 class QualityIssue:
@@ -140,32 +136,43 @@ def build_backfill_completeness_report(
     )
 
 
+def effective_trade_calendar_start(requested_start: date) -> date:
+    """First weekday on or after requested_start (weekends only; no holiday table)."""
+    if requested_start.weekday() < 5:
+        return requested_start
+    return next_open_trading_day(requested_start - timedelta(days=1))
+
+
 def effective_trade_calendar_end(requested_end: date) -> date:
-    """Last weekday on or before requested_end (no holiday table)."""
+    """Last weekday on or before requested_end (weekends only; no holiday table)."""
     candidate = requested_end
     while candidate.weekday() >= 5:
         candidate -= timedelta(days=1)
     return candidate
 
 
-def _covers_trade_calendar_start(
-    *,
+def effective_trade_calendar_start_bound(
     requested_start: date,
-    actual_start: date,
-    actual_open_dates: list[date],
-) -> bool:
-    ideal_start = next_open_trading_day(requested_start - timedelta(days=1))
-    if actual_start <= ideal_start:
-        return True
-    first_in_range = min(
-        (day for day in actual_open_dates if requested_start <= day),
-        default=None,
-    )
-    if first_in_range is None:
-        return False
-    if actual_start != first_in_range:
-        return False
-    return (actual_start - requested_start) <= _MAX_NON_TRADING_START_GAP
+    *,
+    reference_open_dates: list[date] | None = None,
+) -> date:
+    if reference_open_dates:
+        eligible = [day for day in reference_open_dates if day >= requested_start]
+        if eligible:
+            return min(eligible)
+    return effective_trade_calendar_start(requested_start)
+
+
+def effective_trade_calendar_end_bound(
+    requested_end: date,
+    *,
+    reference_open_dates: list[date] | None = None,
+) -> date:
+    if reference_open_dates:
+        eligible = [day for day in reference_open_dates if day <= requested_end]
+        if eligible:
+            return max(eligible)
+    return effective_trade_calendar_end(requested_end)
 
 
 def build_trade_calendar_range_report(
@@ -173,14 +180,25 @@ def build_trade_calendar_range_report(
     requested_end: date,
     actual_open_dates: list[date],
     *,
-    source_limit_bars: int,
+    source_limit_bars: int | None = None,
+    source_label: str | None = None,
+    reference_open_dates: list[date] | None = None,
 ) -> CoverageReport:
-    effective_end = effective_trade_calendar_end(requested_end)
+    effective_start = effective_trade_calendar_start_bound(
+        requested_start,
+        reference_open_dates=reference_open_dates,
+    )
+    effective_end = effective_trade_calendar_end_bound(
+        requested_end,
+        reference_open_dates=reference_open_dates,
+    )
     base_details = {
         "requested_start": requested_start.isoformat(),
         "requested_end": requested_end.isoformat(),
+        "effective_start": effective_start.isoformat(),
         "effective_end": effective_end.isoformat(),
         "source_limit_bars": source_limit_bars,
+        "source_label": source_label,
     }
     if not actual_open_dates:
         return CoverageReport(
@@ -194,11 +212,7 @@ def build_trade_calendar_range_report(
         )
     actual_start = min(actual_open_dates)
     actual_end = max(actual_open_dates)
-    covers_start = _covers_trade_calendar_start(
-        requested_start=requested_start,
-        actual_start=actual_start,
-        actual_open_dates=actual_open_dates,
-    )
+    covers_start = actual_start <= effective_start
     covers_end = actual_end >= effective_end
     covers = covers_start and covers_end
     return CoverageReport(

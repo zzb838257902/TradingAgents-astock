@@ -28,6 +28,7 @@ from tradingagents.market_data.providers.free_astock_sources import (
     LiveFreeAStockSourceBackend,
 )
 from tradingagents.market_data.sync_policy import live_snapshot_date_error
+from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
 
 _PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
     ("security_master", "mootdx.stocks", PITLevel.PIT_REQUIRED, "public metadata"),
@@ -483,6 +484,9 @@ class FreeAStockProvider:
                 dataset=dataset,
                 endpoint=endpoint,
                 permitted=permitted,
+                max_rows_per_call=(
+                    SINA_SSE_CALENDAR_MAX_BARS if dataset == "trade_calendar" else None
+                ),
                 pit_level=pit_level,
                 license_note=license_note,
                 probed_at=run_time,

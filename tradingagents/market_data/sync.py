@@ -21,7 +21,6 @@ from tradingagents.market_data.quality import (
     build_security_coverage_report,
     build_trade_calendar_range_report,
 )
-from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
 from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync_policy import (
@@ -45,21 +44,30 @@ def _trade_calendar_range_error(
     effective_end = details.get("effective_end", end.isoformat())
     actual_start = details.get("actual_start")
     actual_end = details.get("actual_end")
+    source_label = details.get("source_label")
+    source_limit_bars = details.get("source_limit_bars")
+    limit_note = ""
+    if source_label or source_limit_bars:
+        label = source_label or "provider"
+        if source_limit_bars:
+            limit_note = f" ({label} limited to ~{source_limit_bars} bars)"
+        else:
+            limit_note = f" ({label})"
     if actual_start is None and actual_end is None:
         return (
             "trade calendar source returned no open days for "
-            f"{start.isoformat()}..{end.isoformat()} "
-            f"(Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
+            f"{start.isoformat()}..{end.isoformat()}{limit_note}"
         )
     parts: list[str] = []
     if details.get("covers_start") is False:
+        effective_start = details.get("effective_start", start.isoformat())
         parts.append(
-            "start gap: requested from "
-            f"{start.isoformat()}, actual from {actual_start}"
+            "start gap: expected from "
+            f"{effective_start}, actual from {actual_start}"
         )
     if details.get("covers_end") is False:
         parts.append(
-            "end gap: requested through "
+            "end gap: expected through "
             f"{effective_end}, actual through {actual_end}"
         )
     if not parts:
@@ -67,7 +75,7 @@ def _trade_calendar_range_error(
     return (
         "trade calendar source does not cover requested range: "
         + "; ".join(parts)
-        + f" (Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
+        + limit_note
     )
 
 
@@ -101,6 +109,20 @@ class MarketDataSync:
 
     def _requires_live_snapshot_date(self) -> bool:
         return getattr(self.provider, "name", "") == "free_astock"
+
+    def _trade_calendar_probe_limits(self) -> tuple[int | None, str | None]:
+        probe = self.repository.get_capability_probe()
+        if probe is None:
+            auto = self.probe_capabilities()
+            if auto.status != SyncStatus.PUBLISHED:
+                return None, getattr(self.provider, "name", None)
+            probe = self.repository.get_capability_probe()
+        if not probe:
+            return None, getattr(self.provider, "name", None)
+        entry = probe.get("trade_calendar") or {}
+        max_rows = entry.get("max_rows_per_call")
+        label = entry.get("endpoint") or entry.get("license_note") or self.provider.name
+        return max_rows, label
 
     def probe_capabilities(self) -> SyncResult:
         result = self.provider.probe_capabilities()
@@ -210,11 +232,15 @@ class MarketDataSync:
             return self._error_result("trade_calendar", fetched)
         days = fetched.data or []
         open_dates = sorted(day.trade_date for day in days if day.is_open)
+        source_limit_bars, source_label = self._trade_calendar_probe_limits()
+        reference_open_dates = self.repository.list_open_trade_dates() or None
         range_report = build_trade_calendar_range_report(
             start,
             end,
             open_dates,
-            source_limit_bars=SINA_SSE_CALENDAR_MAX_BARS,
+            source_limit_bars=source_limit_bars,
+            source_label=source_label,
+            reference_open_dates=reference_open_dates,
         )
         if range_report.status != "pass":
             return SyncResult(
