@@ -26,7 +26,11 @@ from tradingagents.market_data.providers.existing_astock import ExistingAStockPr
 from tradingagents.market_data.providers.free_astock_sources import (
     FreeAStockSourceBackend,
     LiveFreeAStockSourceBackend,
+    ProviderFetchError,
 )
+from tradingagents.events.contracts import MarketEvent
+from tradingagents.events.normalizer import normalize_fund_flow_row, normalize_hot_topic_row, normalize_news_row
+from tradingagents.events.fetch import collect_announcement_bundles, retry_fetch
 from tradingagents.market_data.sync_policy import live_snapshot_date_error
 from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
 
@@ -39,6 +43,13 @@ _PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
     ("concept_members", "eastmoney.board", PITLevel.CURRENT_ONLY, "live snapshot only"),
     ("index_members", "eastmoney.board", PITLevel.CURRENT_ONLY, "live snapshot only"),
     ("adjustment_factors", "mootdx.xdxr", PITLevel.PIT_REQUIRED, "ex_date PIT via corporate actions"),
+]
+
+_EVENT_PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
+    ("official_announcements", "sina.corp.vCB_AllBulletin", PITLevel.PIT_REQUIRED, "bulletin metadata"),
+    ("event_news", "eastmoney.search.cmsArticleWebOld", PITLevel.BEST_EFFORT, "headline only"),
+    ("event_fund_flow", "eastmoney.push2.fund_flow", PITLevel.BEST_EFFORT, "daily main force"),
+    ("event_hot_topics", "ths.10jqka.getharden", PITLevel.CURRENT_ONLY, "same-day snapshot"),
 ]
 
 
@@ -509,6 +520,225 @@ class FreeAStockProvider:
             available_at=run_time,
             pit_level=PITLevel.PIT_REQUIRED,
             errors=errors,
+        )
+
+    def _fetch_event_with_retry(self, operation):
+        return retry_fetch(operation)
+
+    def probe_event_capabilities(self) -> DataResult[list[ProviderCapability]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        capabilities: list[ProviderCapability] = []
+        errors: list[str] = []
+        sample_symbols: list[str] = []
+        try:
+            sample_symbols = [
+                row["symbol"]
+                for row in self._backend.list_mootdx_stocks()[:1]
+            ]
+        except Exception as exc:
+            errors.append(f"official_announcements: {exc}")
+
+        for dataset, endpoint, pit_level, license_note in _EVENT_PROBE_SPECS:
+            permitted = False
+            error: str | None = None
+            try:
+                if dataset == "official_announcements" and sample_symbols:
+                    rows = self._fetch_event_with_retry(
+                        lambda: self._backend.fetch_sina_bulletin_rows(sample_symbols[0], page=1)
+                    )
+                    permitted = rows is not None
+                elif dataset == "event_news" and sample_symbols:
+                    rows = self._fetch_event_with_retry(
+                        lambda: self._backend.fetch_eastmoney_news_rows(sample_symbols[0])
+                    )
+                    permitted = rows is not None
+                elif dataset == "event_fund_flow" and sample_symbols:
+                    row = self._fetch_event_with_retry(
+                        lambda: self._backend.fetch_eastmoney_fund_flow_row(
+                            sample_symbols[0],
+                            run_time.date(),
+                        )
+                    )
+                    permitted = row is not None or row is None
+                elif dataset == "event_hot_topics":
+                    rows = self._fetch_event_with_retry(
+                        lambda: self._backend.fetch_ths_hot_topic_rows(run_time.date())
+                    )
+                    permitted = rows is not None
+            except ProviderFetchError as exc:
+                permitted = False
+                error = exc.message
+            except Exception as exc:
+                permitted = False
+                error = str(exc)
+            if error:
+                errors.append(f"{dataset}: {error}")
+            capabilities.append(ProviderCapability(
+                dataset=dataset,
+                endpoint=endpoint,
+                permitted=permitted,
+                pit_level=pit_level,
+                license_note=license_note,
+                probed_at=run_time,
+                error=error,
+            ))
+        status = DataStatus.OK if any(item.permitted for item in capabilities) else DataStatus.PARTIAL
+        return _result(
+            capabilities,
+            status=status,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+            errors=errors,
+        )
+
+    def fetch_announcements(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> DataResult[list[MarketEvent]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        try:
+            bundles, status, errors = collect_announcement_bundles(
+                self._backend,
+                list(symbols),
+                start,
+                end,
+                source=self.name,
+            )
+        except ProviderFetchError as exc:
+            return _result(
+                None,
+                status=DataStatus(exc.status),
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.PIT_REQUIRED,
+                errors=[exc.message],
+            )
+        if status in {DataStatus.NETWORK_ERROR, DataStatus.RATE_LIMITED, DataStatus.ERROR}:
+            return _result(
+                None,
+                status=status,
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.PIT_REQUIRED,
+                errors=errors,
+            )
+        return _result(
+            [bundle.event for bundle in bundles],
+            status=status,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+            errors=errors,
+        )
+
+    def fetch_news(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> DataResult[list[MarketEvent]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        events: list[MarketEvent] = []
+        for symbol in symbols:
+            try:
+                rows = self._fetch_event_with_retry(
+                    lambda sym=symbol: self._backend.fetch_eastmoney_news_rows(sym)
+                )
+            except ProviderFetchError as exc:
+                return _result(
+                    None,
+                    status=DataStatus(exc.status),
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=run_time,
+                    pit_level=PITLevel.BEST_EFFORT,
+                    errors=[exc.message],
+                )
+            for row in rows:
+                published = row.get("published_at")
+                if isinstance(published, datetime) and (
+                    published.date() < start or published.date() > end
+                ):
+                    continue
+                event, _link = normalize_news_row(row, source=self.name)
+                events.append(event)
+        return _result(
+            events,
+            status=DataStatus.OK if events else DataStatus.SUCCESS_EMPTY,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.BEST_EFFORT,
+        )
+
+    def fetch_fund_flow_events(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+    ) -> DataResult[list[MarketEvent]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        events: list[MarketEvent] = []
+        for symbol in symbols:
+            try:
+                row = self._fetch_event_with_retry(
+                    lambda sym=symbol: self._backend.fetch_eastmoney_fund_flow_row(sym, trade_date)
+                )
+            except ProviderFetchError as exc:
+                return _result(
+                    None,
+                    status=DataStatus(exc.status),
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=run_time,
+                    pit_level=PITLevel.BEST_EFFORT,
+                    errors=[exc.message],
+                )
+            if row is None:
+                continue
+            event, _link = normalize_fund_flow_row(row, source=self.name)
+            events.append(event)
+        return _result(
+            events,
+            status=DataStatus.OK if events else DataStatus.SUCCESS_EMPTY,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.BEST_EFFORT,
+        )
+
+    def fetch_hot_topics(self, trade_date: date) -> DataResult[list[MarketEvent]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        try:
+            rows = self._fetch_event_with_retry(
+                lambda: self._backend.fetch_ths_hot_topic_rows(trade_date)
+            )
+        except ProviderFetchError as exc:
+            return _result(
+                None,
+                status=DataStatus(exc.status),
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.CURRENT_ONLY,
+                errors=[exc.message],
+            )
+        events: list[MarketEvent] = []
+        for row in rows:
+            events.append(normalize_hot_topic_row(row, source=self.name))
+        return _result(
+            events,
+            status=DataStatus.OK if events else DataStatus.SUCCESS_EMPTY,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.CURRENT_ONLY,
         )
 
 

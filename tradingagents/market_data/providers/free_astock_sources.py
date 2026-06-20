@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date, datetime, time
 from typing import Any, Protocol
@@ -96,6 +97,16 @@ class FreeAStockSourceBackend(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def fetch_xdxr_frame(self, symbol: str) -> list[dict[str, Any]]: ...
+
+    def fetch_sina_bulletin_rows(self, symbol: str, page: int = 1) -> list[dict[str, Any]]: ...
+
+    def fetch_eastmoney_news_rows(self, symbol: str) -> list[dict[str, Any]]: ...
+
+    def fetch_eastmoney_fund_flow_row(
+        self, symbol: str, trade_date: date
+    ) -> dict[str, Any] | None: ...
+
+    def fetch_ths_hot_topic_rows(self, trade_date: date) -> list[dict[str, Any]]: ...
 
 
 class LiveFreeAStockSourceBackend:
@@ -318,6 +329,134 @@ class LiveFreeAStockSourceBackend:
             return []
         return frame.to_dict(orient="records")
 
+    def fetch_sina_bulletin_rows(self, symbol: str, page: int = 1) -> list[dict[str, Any]]:
+        import requests
+
+        code = _normalize_event_symbol(symbol)
+        url = (
+            "https://vip.stock.finance.sina.com.cn/corp/view/"
+            f"vCB_AllBulletin.php?stockid={code}&Page={page}"
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+            ),
+            "Referer": "https://finance.sina.com.cn/",
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+        except requests.RequestException as exc:
+            raise ProviderFetchError("network_error", str(exc)) from exc
+        if response.status_code == 429:
+            raise ProviderFetchError("rate_limited", f"HTTP 429 for {code}")
+        if response.status_code >= 400:
+            raise ProviderFetchError("http_error", f"HTTP {response.status_code} for {code}")
+        response.encoding = response.apparent_encoding or "gb2312"
+        try:
+            return parse_sina_bulletin_html(response.text, code)
+        except Exception as exc:
+            raise ProviderFetchError("parse_error", str(exc)) from exc
+
+    def fetch_eastmoney_news_rows(self, symbol: str) -> list[dict[str, Any]]:
+        from tradingagents.dataflows.a_stock import _fetch_news_eastmoney
+
+        code = _normalize_event_symbol(symbol)
+        rows: list[dict[str, Any]] = []
+        try:
+            for item in _fetch_news_eastmoney(code):
+                time_text = str(item.get("time") or "").strip()
+                published_at = datetime.now(tz=SHANGHAI)
+                if time_text:
+                    published_at = datetime.fromisoformat(time_text.replace(" ", "T"))
+                    if published_at.tzinfo is None:
+                        published_at = published_at.replace(tzinfo=SHANGHAI)
+                rows.append({
+                    "symbol": code,
+                    "title": str(item.get("title") or "").strip(),
+                    "published_at": published_at,
+                    "source_url": str(item.get("url") or ""),
+                    "source_record_id": str(item.get("url") or item.get("title") or code),
+                })
+        except Exception as exc:
+            raise ProviderFetchError("network_error", str(exc)) from exc
+        return rows
+
+    def fetch_eastmoney_fund_flow_row(
+        self, symbol: str, trade_date: date
+    ) -> dict[str, Any] | None:
+        from tradingagents.dataflows.a_stock import _em_get
+
+        code = _normalize_event_symbol(symbol)
+        secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
+        try:
+            response = _em_get(
+                "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
+                params={"secid": secid, "lmt": 20, "klt": 101},
+                timeout=15,
+            )
+            payload = response.json().get("data") or {}
+            klines = payload.get("klines") or []
+        except Exception as exc:
+            raise ProviderFetchError("network_error", str(exc)) from exc
+        target = trade_date.isoformat()
+        for line in reversed(klines):
+            parts = str(line).split(",")
+            if len(parts) < 2:
+                continue
+            day = parts[0]
+            if day != target:
+                continue
+            main_net = float(parts[1])
+            sentiment = "positive" if main_net > 0 else "negative" if main_net < 0 else "neutral"
+            return {
+                "symbol": code,
+                "title": f"主力净流入 {main_net/1e4:.0f} 万元",
+                "published_at": _post_close_available_at(trade_date),
+                "source_url": "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
+                "source_record_id": f"{code}:{target}",
+                "sentiment": sentiment,
+            }
+        return None
+
+    def fetch_ths_hot_topic_rows(self, trade_date: date) -> list[dict[str, Any]]:
+        import requests
+
+        snapshot_error = None
+        if trade_date != shanghai_today():
+            from tradingagents.market_data.sync_policy import live_snapshot_date_error
+            snapshot_error = live_snapshot_date_error(trade_date, dataset="event_hot_topics")
+        if snapshot_error:
+            raise ProviderFetchError("error", snapshot_error)
+        url = (
+            "http://zx.10jqka.com.cn/event/api/getharden/"
+            f"date/{trade_date.isoformat()}/orderby/date/orderway/desc/charset/GBK/"
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Chrome/117.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            payload = response.json()
+        except Exception as exc:
+            raise ProviderFetchError("network_error", str(exc)) from exc
+        if payload.get("errocode", 0) != 0:
+            raise ProviderFetchError("parse_error", str(payload.get("errormsg", "unknown")))
+        rows: list[dict[str, Any]] = []
+        for item in payload.get("data") or []:
+            reason = str(item.get("reason") or "").strip()
+            rows.append({
+                "symbol": "",
+                "title": reason or str(item.get("name") or "热点题材"),
+                "published_at": datetime.combine(trade_date, time(9, 35), tzinfo=SHANGHAI),
+                "source_url": url,
+                "source_record_id": f"{trade_date.isoformat()}:{item.get('code', '')}:{reason}",
+            })
+        return rows
+
 
 def _report_period_from_row(row: pd.Series) -> str | None:
     for key in ("报告日", "报告期"):
@@ -375,3 +514,52 @@ def _debt_ratio(balance_row: pd.Series | None) -> float:
     if assets <= 0:
         return 0.0
     return liabilities / assets
+
+
+class ProviderFetchError(Exception):
+    def __init__(self, status: str, message: str):
+        self.status = status
+        self.message = message
+        super().__init__(message)
+
+
+_BULLETIN_ROW_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})</td>\s*<td>\s*"
+    r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",
+    re.IGNORECASE,
+)
+_BULLETIN_ID_RE = re.compile(r"[?&]id=(\d+)", re.IGNORECASE)
+
+
+def parse_sina_bulletin_html(html: str, symbol: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for date_str, href, title in _BULLETIN_ROW_RE.findall(html):
+        record_id = ""
+        match = _BULLETIN_ID_RE.search(href)
+        if match:
+            record_id = match.group(1)
+        if not record_id:
+            record_id = hashlib.sha256(f"{href}|{title}".encode()).hexdigest()[:16]
+        if href.startswith("/"):
+            source_url = f"https://vip.stock.finance.sina.com.cn{href}"
+        else:
+            source_url = href
+        rows.append({
+            "symbol": symbol,
+            "title": title.strip(),
+            "published_date": date.fromisoformat(date_str),
+            "source_record_id": record_id,
+            "source_url": source_url,
+            "source_version": "v1",
+        })
+    return rows
+
+
+def _normalize_event_symbol(symbol: str) -> str:
+    text = symbol.strip().upper()
+    if "." in text:
+        text = text.split(".", 1)[0]
+    if len(text) == 6 and text.isdigit():
+        return text
+    raise ValueError(f"invalid A-share symbol: {symbol!r}")
+
