@@ -81,6 +81,7 @@ def test_event_sync_success_empty_publishes_empty_version(tmp_path):
     assert result.run_id
     assert result.version_id
     assert repo.get_latest_published_version("market_events") is not None
+    assert list(Path(paths.snapshot_dir).glob("*.json.gz"))
 
 
 def test_event_sync_success_empty_does_not_block(tmp_path):

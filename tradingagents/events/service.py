@@ -142,6 +142,19 @@ class EventSyncService:
         deduped, stats = deduplicate_event_bundles(bundles)
         if not deduped:
             if fetched.status == DataStatus.SUCCESS_EMPTY:
+                self._save_snapshot(
+                    "sina.corp.vCB_AllBulletin",
+                    {
+                        "symbols": symbols,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                    {
+                        "events": [],
+                        "success_empty": True,
+                        "dedup_stats": stats.__dict__,
+                    },
+                )
                 run_id = self.repository.begin_ingestion_run(
                     "market_events",
                     {

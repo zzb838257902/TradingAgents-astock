@@ -35,6 +35,7 @@ _ALLOWED_URL_HOSTS = frozenset({
 })
 
 _TYPE_RULES: tuple[tuple[re.Pattern[str], EventType], ...] = (
+    (re.compile(r"终止上市"), EventType.ST_DELIST),
     (re.compile(r"年度报告|半年度报告|季度报告"), EventType.FINANCIAL_REPORT),
     (re.compile(r"业绩预告|业绩快报"), EventType.EARNINGS_FORECAST),
     (re.compile(r"分红|派息"), EventType.DIVIDEND),
@@ -53,7 +54,9 @@ _TYPE_RULES: tuple[tuple[re.Pattern[str], EventType], ...] = (
 
 _POSITIVE_HINTS = re.compile(r"增持|中标|回购|分红|利好|预增|增长")
 _NEGATIVE_HINTS = re.compile(r"减持|处罚|立案|亏损|预减|警示|违规|退市")
-_POSITIVE_RELIEF_HINTS = re.compile(r"撤销|解除|终止调查|终止|结案|不予立案|恢复上市|摘星|撤销退市")
+_POSITIVE_RELIEF_HINTS = re.compile(
+    r"撤销|解除|终止调查|终止立案|结案|不予立案|恢复上市|摘星|撤销退市"
+)
 
 
 def normalize_symbol(symbol: str) -> str:

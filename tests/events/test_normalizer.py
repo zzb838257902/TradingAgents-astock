@@ -41,6 +41,33 @@ def test_infer_severity_marks_st_and_investigation_critical():
 def test_infer_severity_treats_relief_announcements_as_low():
     assert infer_severity("关于撤销退市风险警示的公告", EventType.ST_DELIST) == EventSeverity.LOW
     assert infer_severity("关于终止调查的公告", EventType.INVESTIGATION) == EventSeverity.LOW
+    assert infer_severity("关于终止立案的公告", EventType.INVESTIGATION) == EventSeverity.LOW
+
+
+def test_termination_of_listing_is_critical_hard_risk():
+    from tradingagents.events.contracts import AnnouncementDateSource, MarketEvent
+    from tradingagents.events.scoring import is_hard_risk_event
+    from tradingagents.market_data.contracts import PITLevel
+
+    title = "关于公司股票终止上市的公告"
+    assert classify_event_type(title) == EventType.ST_DELIST
+    assert infer_severity(title, EventType.ST_DELIST) == EventSeverity.CRITICAL
+    event = MarketEvent(
+        event_id="evt-delist",
+        event_type=EventType.ST_DELIST,
+        title=title,
+        published_at=datetime(2026, 5, 6, 16, 0, tzinfo=SHANGHAI),
+        available_at=datetime(2026, 5, 7, 9, 30, tzinfo=SHANGHAI),
+        source="fixture",
+        source_url="https://example.com/1",
+        source_record_id="delist-1",
+        content_hash="hash",
+        pit_level=PITLevel.PIT_REQUIRED,
+        sentiment=EventSentiment.NEGATIVE,
+        severity=infer_severity(title, EventType.ST_DELIST),
+        announcement_date_source=AnnouncementDateSource.REPORTED,
+    )
+    assert is_hard_risk_event(event)
 
 
 def test_conservative_available_at_uses_next_open_day():

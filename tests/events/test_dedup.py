@@ -87,6 +87,19 @@ def test_dedup_keeps_same_title_and_time_with_different_version():
     assert stats.semantic_duplicates == 0
 
 
+def test_dedup_semantic_still_collapses_cross_source_same_title():
+    title = "Same bulletin title"
+    first = _bundle(_event("evt-a", "record-a", title, version="v1"))
+    second = _event("evt-b", "record-b", title, version="v1").model_copy(update={
+        "source": "other_source",
+        "content_hash": "hash-b",
+        "source_url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=b",
+    })
+    kept, stats = deduplicate_event_bundles([first, _bundle(second)])
+    assert len(kept) == 1
+    assert stats.kept == 1
+
+
 def test_dedup_counts_semantic_title_time_symbol_duplicates():
     first = _bundle(_event("evt-1", "a", "Same title"))
     second = _event("evt-2", "b", "Same title")

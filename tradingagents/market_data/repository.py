@@ -1435,6 +1435,27 @@ class MarketDataRepository:
         ]
         return dict(zip(columns, row))
 
+    def get_latest_market_events_ingestion_params(self) -> dict[str, Any] | None:
+        version = self.get_latest_published_version("market_events")
+        if version is None:
+            return None
+        row = self.connection.execute(
+            "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+            [version["ingestion_run_id"]],
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    def has_success_empty_announcement_sync(self, symbols: list[str] | None = None) -> bool:
+        params = self.get_latest_market_events_ingestion_params()
+        if not params or not params.get("success_empty"):
+            return False
+        if symbols is None:
+            return True
+        synced = {str(symbol) for symbol in (params.get("symbols") or [])}
+        return bool(synced.intersection(symbols))
+
     def save_raw_snapshot(
         self,
         source: str,

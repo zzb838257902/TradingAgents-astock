@@ -473,6 +473,7 @@ def test_all_candidates_hard_risk_filtered_produces_all_cash_portfolio(tmp_path:
     assert report.target_weights == {}
     assert report.positions == 0
     assert report.cash_weight == 1.0
+    assert report.top_symbol is None
     assert "all_candidates_hard_risk_filtered" in report.event_degradations.get("__global__", [])
 
 
@@ -509,6 +510,29 @@ def test_st_relief_does_not_trigger_hard_risk_exclusion(tmp_path: Path):
     report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
     assert "600002" not in report.risk_flags
     assert "600002" in report.target_weights
+
+
+def test_required_announcements_satisfied_by_success_empty_sync(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3, require_announcements=True)
+    db_path = tmp_path / "success-empty.duckdb"
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    run_screen(fixture, config, db_path, universe_request=request)
+    repo = MarketDataRepository(db_path)
+    run_id = repo.begin_ingestion_run(
+        "market_events",
+        {
+            "dataset": "official_announcements",
+            "symbols": ["600001", "600002", "600003"],
+            "success_empty": True,
+        },
+    )
+    repo.upsert_staging_event_bundle(run_id, events=[], links=[], tags=[])
+    repo.publish_event_bundle(run_id)
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
+    assert report.status == ScreeningStatus.OK
+    assert not report.errors
+    assert report.event_dataset_versions["official_announcements"] is not None
 
 
 def test_dataset_versions_only_populated_for_present_datasets(tmp_path: Path):

@@ -443,6 +443,7 @@ def run_screen(
     }
 
     enrichment_kwargs: dict = {}
+    all_cash_portfolio = False
     portfolio_input = scored.rename(columns={"ensemble_score": "score"})
     if config.event_enrichment.enabled:
         enrichment = enrich_ranking_with_events(
@@ -476,6 +477,7 @@ def run_screen(
         scored_index = scored.set_index("symbol")
         if not enrichment.portfolio_ranking:
             portfolio = PortfolioSuggestion(positions=[], cash=float(portfolio_value))
+            all_cash_portfolio = True
         else:
             portfolio_rows = []
             for symbol in enrichment.portfolio_ranking:
@@ -574,7 +576,9 @@ def run_screen(
         orders=orders,
         metrics=metrics,
         positions=len(portfolio.positions),
-        top_symbol=next(iter(rounded_weights), ranking[0] if ranking else None),
+        top_symbol=None if all_cash_portfolio else next(
+            iter(rounded_weights), ranking[0] if ranking else None,
+        ),
         **enrichment_kwargs,
     )
 

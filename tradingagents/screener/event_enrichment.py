@@ -210,6 +210,19 @@ def _build_rankings(
     return event_ranking, enhanced_ranking, enhanced_ranking, portfolio_scores
 
 
+def _dataset_requirement_satisfied(
+    repo: MarketDataRepository,
+    dataset: EventDataset,
+    present_datasets: set[EventDataset],
+    candidates: list[str],
+) -> bool:
+    if dataset in present_datasets:
+        return True
+    if dataset == EventDataset.OFFICIAL_ANNOUNCEMENTS:
+        return repo.has_success_empty_announcement_sync(candidates)
+    return False
+
+
 def enrich_ranking_with_events(
     repo: MarketDataRepository,
     config: ScreenerConfig,
@@ -265,7 +278,9 @@ def enrich_ranking_with_events(
     if historical_error:
         global_degradations.append(historical_error)
     for flag_name, dataset in REQUIRED_DATASET_MAP.items():
-        if getattr(cfg, flag_name) and dataset not in present_datasets:
+        if getattr(cfg, flag_name) and not _dataset_requirement_satisfied(
+            repo, dataset, present_datasets, candidates,
+        ):
             enrichment_errors.append(
                 f"required dataset {DATASET_REPORT_KEYS[dataset]} missing"
             )
@@ -309,7 +324,7 @@ def enrich_ranking_with_events(
     if candidates and not portfolio_ranking:
         global_degradations.append("all_candidates_hard_risk_filtered")
 
-    versions = _event_dataset_versions(repo, present_datasets)
+    versions = _event_dataset_versions(repo, present_datasets, candidates)
     degradations = _merge_degradations(global_degradations, degradations_by_symbol)
 
     if enrichment_errors:
@@ -347,12 +362,20 @@ def enrich_ranking_with_events(
 def _event_dataset_versions(
     repo: MarketDataRepository,
     present_datasets: set[EventDataset],
+    candidates: list[str],
 ) -> dict[str, dict[str, Any] | None]:
     version = repo.get_latest_published_version("market_events")
-    return {
+    versions = {
         DATASET_REPORT_KEYS[dataset]: (version if dataset in present_datasets else None)
         for dataset in EventDataset
     }
+    if (
+        version is not None
+        and EventDataset.OFFICIAL_ANNOUNCEMENTS not in present_datasets
+        and repo.has_success_empty_announcement_sync(candidates)
+    ):
+        versions[DATASET_REPORT_KEYS[EventDataset.OFFICIAL_ANNOUNCEMENTS]] = version
+    return versions
 
 
 def _merge_degradations(
