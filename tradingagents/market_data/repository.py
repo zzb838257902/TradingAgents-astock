@@ -1154,14 +1154,14 @@ class MarketDataRepository:
                        e.quality_status, e.supersedes_event_id
                 FROM market_events e
                 INNER JOIN event_symbol_links l ON e.event_id = l.event_id
-                LEFT JOIN dataset_versions v ON e.dataset_version_id = v.version_id
-                LEFT JOIN dataset_versions lv ON l.dataset_version_id = lv.version_id
+                INNER JOIN dataset_versions v ON e.dataset_version_id = v.version_id
+                INNER JOIN dataset_versions lv ON l.dataset_version_id = lv.version_id
                 WHERE l.symbol IN ({placeholders})
                   AND e.available_at IS NOT NULL
                   AND e.available_at <= ?
                   AND e.quality_status != 'rejected'
-                  AND (e.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
-                  AND (l.dataset_version_id IS NULL OR lv.status = 'PUBLISHED')
+                  AND v.status = 'PUBLISHED'
+                  AND lv.status = 'PUBLISHED'
                 ORDER BY e.available_at, e.event_id""",
             [*symbols, available_before],
         ).fetchall()
@@ -1180,9 +1180,9 @@ class MarketDataRepository:
         rows = self.connection.execute(
             f"""SELECT t.event_id, t.tag_key, t.tag_value
                 FROM event_tags t
-                LEFT JOIN dataset_versions v ON t.dataset_version_id = v.version_id
+                INNER JOIN dataset_versions v ON t.dataset_version_id = v.version_id
                 WHERE t.event_id IN ({placeholders})
-                  AND (t.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+                  AND v.status = 'PUBLISHED'
                 ORDER BY t.event_id, t.tag_key""",
             event_ids,
         ).fetchall()

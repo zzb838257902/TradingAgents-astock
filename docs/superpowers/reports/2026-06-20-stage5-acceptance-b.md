@@ -1,64 +1,42 @@
-# 阶段 5 中期验收 B（Task 7 后）
+# 阶段 5 中期验收 B（Task 7 后，P0/P1 修复版）
 
 > 日期：2026-06-20  
-> 基线 commit（Task 6）：`f87d2515`  
-> Task 7 commit：`4fb42665`  
 > 状态：**待用户确认**
 
-## 1. 验收范围
+## 1. P0/P1 修复摘要
 
-Pipeline / 报告 / CLI 集成可选事件增强，默认关闭时阶段 4 业务输出等价。
+| 级别 | 问题 | 修复 |
+|------|------|------|
+| P0 | 事件增强未参与组合构建 | Pipeline 改为：基础排名 → 事件增强/硬风险过滤 → Portfolio → 回测；`ranking`/`base_ranking` 保留为审计字段 |
+| P0 | 硬风险股票仍在增强排名末尾 | `sort_enhanced_ranking` 完全排除硬风险；组合候选同步排除 |
+| P0 | 必需源失败仍 `status=ok` | 必需数据集缺失时返回 `ScreeningStatus.DATA_ERROR`，不生成权重/订单 |
+| P1 | 修订公告被 URL 去重误删 | URL 去重键加入 `source_version`；record 键使用 `stable_event_id` |
+| P1 | Repository 可读 NULL 版本 | `get_market_events` / `get_event_tags` 强制 `INNER JOIN` 已发布版本 |
+| P1 | `event_score=0` 被当作缺失 | 专用排序键，不再使用 `or float("-inf")` |
+| P1 | 公告 severity 恒为 MEDIUM | 新增 `infer_severity()`，ST/立案/重大处罚/长期停牌可触发 CRITICAL |
+| P1 | SUCCESS_EMPTY 被标 BLOCKED | 合法空结果返回 `EventSyncStatus.PUBLISHED` |
+| P1 | 四类数据集共用同一版本 | 仅对实际存在的数据集填充 `event_dataset_versions` |
 
 ## 2. 自动化证据
 
 ```bash
 PYTHONPATH='.pip_packages:.' python3 -m pytest tests/ -q --capture=no
-# 443 passed, 1 skipped（langchain_google_genai 可选依赖）
+# 449 passed, 1 skipped
 
 PYTHONPATH='.pip_packages:.' python3 -m ruff check \
-  tradingagents/screener/event_enrichment.py \
-  tradingagents/screener/pipeline.py tradingagents/screener/report.py \
-  tradingagents/screener/cli.py tradingagents/market_data/cli.py \
-  tradingagents/market_data/repository.py \
-  tests/events/test_pipeline.py tests/events/test_event_cli.py \
-  tests/screener/test_phase47.py
+  tradingagents/events tradingagents/screener/event_enrichment.py \
+  tradingagents/screener/pipeline.py tradingagents/market_data/repository.py \
+  tests/events/
 ```
 
-## 3. 检查项
+## 3. 关键测试
 
-| 项 | 结果 | 证据 |
-|---|---|---|
-| 阶段 4 等价性（`enabled=false`） | PASS | `tests/events/test_stage4_equivalence.py`、`test_disabled_enrichment_preserves_stage4_ranking_and_portfolio` |
-| 三套排名并列输出 | PASS | `base_ranking` / `event_ranking` / `enhanced_ranking`；`ranking` 保持阶段 4 基础序 |
-| PIT 防未来 | PASS | `test_future_events_do_not_affect_historical_enrichment`；Repository `available_at <= signal_time` |
-| 可信硬风险过滤 | PASS | `test_hard_risk_flags_exclude_symbol_from_enhanced_ranking` |
-| 降级与必需源失败 | PASS | `test_required_announcements_missing_records_enrichment_error`；非必需缺失保留 `ranking` |
-| 仅查询 Top N 候选 | PASS | `test_repository_queries_only_top_candidates` |
-| 贡献可审计 | PASS | `event_contributions`、`event_dataset_versions`、`event_data_sources` |
-| CLI 集成 | PASS | `tests/events/test_event_cli.py`；`market-data sync --dataset events` |
+- `test_portfolio_reflects_hard_risk_filter`：硬风险开/关组合权重变化，过滤后零持仓
+- `test_hard_risk_excludes_symbol_from_ranking_and_portfolio`：增强排名与 `target_weights` 均不含硬风险股
+- `test_required_announcements_missing_returns_data_error_without_portfolio`：`DATA_ERROR` + 空权重/订单
+- `test_revision_events_both_readable_after_publish` / `test_dedup_keeps_revision_with_new_source_version`：修订共存
+- `test_disabled_enrichment_preserves_stage4_ranking_and_portfolio`：关闭增强阶段 4 等价
 
-## 4. 行为摘要
+## 4. 结论
 
-- **默认关闭**：`ranking`、权重、组合、回测与阶段 4 一致；事件侧车字段为空。
-- **开启后**：组合仍由阶段 4 `ensemble_score` 构建；事件仅影响 `event_ranking` / `enhanced_ranking` 与审计字段。
-- **数据路径**：Pipeline 只读 `MarketDataRepository.get_market_events()`，不隐式联网。
-- **历史信号**：`CURRENT_ONLY` 热点数据集拒绝并记录 `event_degradations`。
-
-## 5. 样例（fixture `mvp_market.json`，信号日 2025-12-18）
-
-注入三只候选事件后（600001 回购利好 / 600002 处罚+软风险 / 600003 中性）：
-
-- `ranking` == `base_ranking`（阶段 4 因子序）
-- `event_ranking` 按 `event_score` 重排
-- `enhanced_ranking` 融合 `event_weight=0.20` 后的序
-- `event_contributions["600001"]` 含可逆算条目（`raw_impact`、`decay`、`weighted_impact`）
-
-## 6. 未纳入本验收
-
-- Task 8 分层验收脚本（`scripts/accept_event_enrichment.py`）
-- 当日 free live smoke（属验收 B 的运营子项，Task 8）
-- 模拟组合 / Scheduler 连续五日（阶段 6）
-
-## 7. 结论
-
-**中期验收 B：自动化项全部通过，请确认是否继续 Task 8。**
+P0/P1 已修复并补充验证测试。**请确认是否通过中期验收 B 并继续 Task 8。**

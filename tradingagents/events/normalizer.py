@@ -104,6 +104,23 @@ def content_hash_for(title: str, source_record_id: str, source_url: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def infer_severity(title: str, event_type: EventType) -> EventSeverity:
+    if event_type in {EventType.ST_DELIST, EventType.INVESTIGATION}:
+        return EventSeverity.CRITICAL
+    if event_type == EventType.PENALTY and re.search(r"重大|严重", title):
+        return EventSeverity.CRITICAL
+    if event_type == EventType.SUSPEND_RESUME and re.search(r"长期停牌", title):
+        return EventSeverity.CRITICAL
+    if event_type in {
+        EventType.PENALTY,
+        EventType.INVESTIGATION,
+        EventType.ST_DELIST,
+        EventType.SUSPEND_RESUME,
+    }:
+        return EventSeverity.HIGH
+    return EventSeverity.MEDIUM
+
+
 def normalize_announcement_row(
     row: dict[str, Any],
     *,
@@ -126,9 +143,10 @@ def normalize_announcement_row(
     source_version = str(row.get("source_version") or "v1")
     available_at = conservative_available_at(published_date, open_dates=open_dates)
     event_id = str(row.get("event_id") or uuid.uuid4())
+    event_type = classify_event_type(title)
     event = MarketEvent(
         event_id=event_id,
-        event_type=classify_event_type(title),
+        event_type=event_type,
         title=title,
         summary=str(row.get("summary") or title)[:500],
         published_at=published_at,
@@ -140,7 +158,7 @@ def normalize_announcement_row(
         content_hash=content_hash_for(title, source_record_id, source_url),
         pit_level=PITLevel.PIT_REQUIRED,
         sentiment=infer_sentiment(title),
-        severity=EventSeverity.MEDIUM,
+        severity=infer_severity(title, event_type),
         announcement_date_source=AnnouncementDateSource.REPORTED,
         supersedes_event_id=row.get("supersedes_event_id"),
         ingested_at=ensure_aware_shanghai(ingested_at or datetime.now(tz=SHANGHAI)),

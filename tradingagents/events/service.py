@@ -144,8 +144,7 @@ class EventSyncService:
             if fetched.status == DataStatus.SUCCESS_EMPTY:
                 return EventSyncResult(
                     dataset="market_events",
-                    status=EventSyncStatus.BLOCKED,
-                    errors=["no announcement events to publish"],
+                    status=EventSyncStatus.PUBLISHED,
                     dedup_stats=stats,
                 )
             return EventSyncResult(

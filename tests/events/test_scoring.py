@@ -186,6 +186,45 @@ def test_contribution_reversibility():
     assert event_component == pytest.approx(result.event_component)
 
 
+def test_sort_enhanced_ranking_excludes_hard_risk_symbols():
+    event = _event(
+        event_type=EventType.ST_DELIST,
+        sentiment=EventSentiment.NEGATIVE,
+        severity=EventSeverity.CRITICAL,
+        pit_level=PITLevel.PIT_REQUIRED,
+    )
+    result = score_symbol_events(
+        "600000",
+        [event],
+        [],
+        base_score=0.9,
+        base_scores={"600000": 0.9},
+        signal_time=SIGNAL,
+        half_life_days=7.0,
+        event_weight=0.20,
+    )
+    assert sort_enhanced_ranking([result]) == []
+
+
+def test_event_score_zero_is_not_treated_as_missing():
+    from tradingagents.events.scoring import SymbolEventScoringResult
+    from tradingagents.screener.event_enrichment import _event_score_sort_key
+
+    zero = SymbolEventScoringResult(
+        symbol="600001",
+        base_score=0.5,
+        normalized_base_score=0.5,
+        event_score=0.0,
+    )
+    missing = SymbolEventScoringResult(
+        symbol="600002",
+        base_score=0.5,
+        normalized_base_score=0.5,
+        event_score=None,
+    )
+    assert _event_score_sort_key(zero) < _event_score_sort_key(missing)
+
+
 def test_sort_enhanced_ranking_tie_breakers():
     results = [
         score_symbol_events(

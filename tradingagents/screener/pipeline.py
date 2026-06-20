@@ -434,8 +434,59 @@ def run_screen(
         momentum_weight=config.strategy.momentum_weight,
         quality_weight=config.strategy.quality_weight,
     )
+    base_ranking = scored.sort_values("ensemble_score", ascending=False)["symbol"].tolist()
+    base_ranking = [symbol for symbol in base_ranking if symbol in included_symbols]
+    base_scores = {
+        str(row.symbol): float(row.ensemble_score)
+        for row in scored.itertuples(index=False)
+    }
+
+    enrichment_kwargs: dict = {}
+    portfolio_input = scored.rename(columns={"ensemble_score": "score"})
+    if config.event_enrichment.enabled:
+        enrichment = enrich_ranking_with_events(
+            repo,
+            config,
+            base_ranking=base_ranking,
+            base_scores=base_scores,
+            signal_time=signal_time,
+        )
+        enrichment_kwargs = enrichment.as_report_kwargs()
+        if enrichment.event_enrichment_errors:
+            return RunReport(
+                run_id=run,
+                status=ScreeningStatus.DATA_ERROR,
+                signal_time=signal_time,
+                data_as_of=signal_time,
+                dataset_versions=dataset_versions,
+                data_sources=data_sources,
+                data_quality=data_quality,
+                pit_level=pit_level,
+                universe_type=request.universe_type.value,
+                universe_code=request.universe_code,
+                universe_size=universe_size,
+                included_count=len(universe.included),
+                excluded_count=len(universe.excluded_reasons),
+                excluded_reasons=universe.excluded_reasons,
+                ranking=base_ranking,
+                errors=enrichment.event_enrichment_errors,
+                **enrichment_kwargs,
+            )
+        scored_index = scored.set_index("symbol")
+        portfolio_rows = []
+        for symbol in enrichment.portfolio_ranking:
+            row = scored_index.loc[symbol]
+            portfolio_rows.append({
+                "symbol": symbol,
+                "industry": row["industry"],
+                "price": row["price"],
+                "avg_volume": row["avg_volume"],
+                "score": enrichment.portfolio_scores[symbol],
+            })
+        portfolio_input = pd.DataFrame(portfolio_rows)
+
     portfolio = construct_portfolio(
-        scored.rename(columns={"ensemble_score": "score"}),
+        portfolio_input,
         portfolio_value=portfolio_value,
         max_positions=config.portfolio.max_positions,
         max_stock_weight=config.portfolio.max_stock_weight,
@@ -467,8 +518,7 @@ def run_screen(
         index=[point.trade_date for point in backtest.equity_curve],
     )
     metrics = performance_metrics(equity) if len(equity) > 1 else {}
-    ranking = scored.sort_values("ensemble_score", ascending=False)["symbol"].tolist()
-    ranking = [symbol for symbol in ranking if symbol in included_symbols]
+    ranking = base_ranking
     orders = [
         {
             "symbol": order.symbol,
@@ -486,21 +536,6 @@ def run_screen(
         for symbol in ranking
     }
     industry_weights = compute_industry_weights(rounded_weights, industry_by_symbol)
-
-    base_scores = {
-        str(row.symbol): float(row.ensemble_score)
-        for row in scored.itertuples(index=False)
-    }
-    enrichment_kwargs: dict = {}
-    if config.event_enrichment.enabled:
-        enrichment = enrich_ranking_with_events(
-            repo,
-            config,
-            base_ranking=ranking,
-            base_scores=base_scores,
-            signal_time=signal_time,
-        )
-        enrichment_kwargs = enrichment.as_report_kwargs()
 
     return RunReport(
         run_id=run,
@@ -526,7 +561,7 @@ def run_screen(
         orders=orders,
         metrics=metrics,
         positions=len(portfolio.positions),
-        top_symbol=ranking[0] if ranking else None,
+        top_symbol=next(iter(rounded_weights), ranking[0] if ranking else None),
         **enrichment_kwargs,
     )
 

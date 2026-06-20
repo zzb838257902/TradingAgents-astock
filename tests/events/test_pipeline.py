@@ -19,6 +19,7 @@ from tradingagents.events.contracts import (
 from tradingagents.market_data.contracts import PITLevel
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
+from tradingagents.screener.event_enrichment import enrich_ranking_with_events
 from tradingagents.screener.pipeline import run_screen
 from tradingagents.screener.report import ScreeningStatus
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
@@ -64,6 +65,8 @@ def _event(
     available_at: datetime,
     severity: EventSeverity = EventSeverity.MEDIUM,
     pit_level: PITLevel = PITLevel.PIT_REQUIRED,
+    source_record_id: str | None = None,
+    source_version: str = "v1",
 ) -> MarketEvent:
     return MarketEvent(
         event_id=event_id,
@@ -73,7 +76,8 @@ def _event(
         available_at=available_at,
         source="fixture",
         source_url="https://example.com/event",
-        source_record_id=event_id,
+        source_record_id=source_record_id or event_id,
+        source_version=source_version,
         content_hash=f"hash-{event_id}",
         pit_level=pit_level,
         sentiment=sentiment,
@@ -187,6 +191,50 @@ def test_enabled_enrichment_exposes_three_rankings_without_overwriting_base(tmp_
     assert "600001" in report.event_contributions
 
 
+def test_portfolio_reflects_hard_risk_filter(tmp_path: Path):
+    fixture = _load_fixture()
+    db_path = tmp_path / "portfolio-hard.duckdb"
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    run_screen(
+        fixture,
+        _relaxed_config(enabled=True, candidate_limit=3),
+        db_path,
+        universe_request=request,
+    )
+    repo = MarketDataRepository(db_path)
+    available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
+    _publish_events(repo, [
+        (
+            _event(
+                event_id="evt-delist",
+                event_type=EventType.ST_DELIST,
+                sentiment=EventSentiment.NEGATIVE,
+                available_at=available,
+                severity=EventSeverity.CRITICAL,
+            ),
+            "600002",
+            [],
+        ),
+    ])
+    without_filter = run_screen(
+        fixture,
+        _relaxed_config(enabled=True, candidate_limit=3, hard_risk_filter=False),
+        db_path,
+        reload=False,
+        universe_request=request,
+    )
+    with_filter = run_screen(
+        fixture,
+        _relaxed_config(enabled=True, candidate_limit=3, hard_risk_filter=True),
+        db_path,
+        reload=False,
+        universe_request=request,
+    )
+    assert "600002" in without_filter.target_weights
+    assert "600002" not in with_filter.target_weights
+    assert without_filter.target_weights != with_filter.target_weights
+
+
 def test_repository_queries_only_top_candidates(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=2)
@@ -211,8 +259,6 @@ def test_repository_queries_only_top_candidates(tmp_path: Path):
         return original(symbols, available_before)
 
     with patch.object(repo, "get_market_events", side_effect=_tracked):
-        from tradingagents.screener.event_enrichment import enrich_ranking_with_events
-
         enrich_ranking_with_events(
             repo,
             config,
@@ -229,15 +275,8 @@ def test_future_events_do_not_affect_historical_enrichment(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=3)
     db_path = tmp_path / "pit.duckdb"
-    baseline = run_screen(
-        fixture,
-        config,
-        db_path,
-        universe_request=UniverseRequest(
-            universe_type=UniverseType.ALL,
-            as_of=_signal_time(fixture),
-        ),
-    )
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    baseline = run_screen(fixture, config, db_path, universe_request=request)
     repo = MarketDataRepository(db_path)
     future_available = datetime(2026, 1, 10, 9, 30, tzinfo=SHANGHAI)
     _publish_events(repo, [
@@ -252,16 +291,7 @@ def test_future_events_do_not_affect_historical_enrichment(tmp_path: Path):
             [],
         ),
     ])
-    after = run_screen(
-        fixture,
-        config,
-        db_path,
-        reload=False,
-        universe_request=UniverseRequest(
-            universe_type=UniverseType.ALL,
-            as_of=_signal_time(fixture),
-        ),
-    )
+    after = run_screen(fixture, config, db_path, reload=False, universe_request=request)
     assert baseline.ranking == after.ranking
     assert baseline.target_weights == after.target_weights
     assert "evt-future" not in {
@@ -271,19 +301,12 @@ def test_future_events_do_not_affect_historical_enrichment(tmp_path: Path):
     }
 
 
-def test_hard_risk_flags_exclude_symbol_from_enhanced_ranking(tmp_path: Path):
+def test_hard_risk_excludes_symbol_from_ranking_and_portfolio(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=3, hard_risk_filter=True)
     db_path = tmp_path / "hard.duckdb"
-    run_screen(
-        fixture,
-        config,
-        db_path,
-        universe_request=UniverseRequest(
-            universe_type=UniverseType.ALL,
-            as_of=_signal_time(fixture),
-        ),
-    )
+    request = UniverseRequest(universe_type=UniverseType.ALL, as_of=_signal_time(fixture))
+    run_screen(fixture, config, db_path, universe_request=request)
     repo = MarketDataRepository(db_path)
     available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
     _publish_events(repo, [
@@ -299,21 +322,14 @@ def test_hard_risk_flags_exclude_symbol_from_enhanced_ranking(tmp_path: Path):
             [],
         ),
     ])
-    report = run_screen(
-        fixture,
-        config,
-        db_path,
-        reload=False,
-        universe_request=UniverseRequest(
-            universe_type=UniverseType.ALL,
-            as_of=_signal_time(fixture),
-        ),
-    )
+    report = run_screen(fixture, config, db_path, reload=False, universe_request=request)
     assert "600002" in report.risk_flags
-    assert report.enhanced_ranking[0] != "600002" or report.risk_flags["600002"]
+    assert "600002" not in report.enhanced_ranking
+    assert "600002" not in report.event_ranking
+    assert "600002" not in report.target_weights
 
 
-def test_required_announcements_missing_records_enrichment_error(tmp_path: Path):
+def test_required_announcements_missing_returns_data_error_without_portfolio(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=3, require_announcements=True)
     report = run_screen(
@@ -325,16 +341,16 @@ def test_required_announcements_missing_records_enrichment_error(tmp_path: Path)
             as_of=_signal_time(fixture),
         ),
     )
-    assert report.status == ScreeningStatus.OK
-    assert report.ranking
-    assert "official_announcements missing" in " ".join(report.event_enrichment_errors)
-    assert report.enhanced_ranking == report.ranking
+    assert report.status == ScreeningStatus.DATA_ERROR
+    assert "official_announcements missing" in " ".join(report.errors)
+    assert report.target_weights == {}
+    assert report.orders == []
 
 
-def test_contributions_are_reversible_to_enhanced_ordering(tmp_path: Path):
+def test_revision_events_both_readable_after_publish(tmp_path: Path):
     fixture = _load_fixture()
     config = _relaxed_config(enabled=True, candidate_limit=3)
-    db_path = tmp_path / "recompute.duckdb"
+    db_path = tmp_path / "revision.duckdb"
     run_screen(
         fixture,
         config,
@@ -345,7 +361,51 @@ def test_contributions_are_reversible_to_enhanced_ordering(tmp_path: Path):
         ),
     )
     repo = MarketDataRepository(db_path)
-    _seed_candidate_events(repo)
+    available = datetime(2025, 12, 10, 9, 30, tzinfo=SHANGHAI)
+    _publish_events(repo, [
+        (
+            _event(
+                event_id="evt-old",
+                event_type=EventType.FINANCIAL_REPORT,
+                sentiment=EventSentiment.NEUTRAL,
+                available_at=available,
+                source_record_id="rev-1",
+                source_version="v1",
+            ),
+            "600003",
+            [],
+        ),
+        (
+            _event(
+                event_id="evt-new",
+                event_type=EventType.FINANCIAL_REPORT,
+                sentiment=EventSentiment.POSITIVE,
+                available_at=available,
+                source_record_id="rev-1",
+                source_version="v2",
+            ),
+            "600003",
+            [],
+        ),
+    ])
+    rows = repo.get_market_events(["600003"], _signal_time(fixture))
+    assert {row["event_id"] for row in rows} == {"evt-old", "evt-new"}
+
+
+def test_dataset_versions_only_populated_for_present_datasets(tmp_path: Path):
+    fixture = _load_fixture()
+    config = _relaxed_config(enabled=True, candidate_limit=3)
+    db_path = tmp_path / "versions.duckdb"
+    run_screen(
+        fixture,
+        config,
+        db_path,
+        universe_request=UniverseRequest(
+            universe_type=UniverseType.ALL,
+            as_of=_signal_time(fixture),
+        ),
+    )
+    _seed_candidate_events(MarketDataRepository(db_path))
     report = run_screen(
         fixture,
         config,
@@ -356,5 +416,5 @@ def test_contributions_are_reversible_to_enhanced_ordering(tmp_path: Path):
             as_of=_signal_time(fixture),
         ),
     )
-    assert report.enhanced_ranking
-    assert report.event_contributions
+    assert report.event_dataset_versions["official_announcements"] is not None
+    assert report.event_dataset_versions["event_news"] is None

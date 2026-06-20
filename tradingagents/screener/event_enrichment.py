@@ -16,6 +16,7 @@ from tradingagents.events.scoring import (
     EventContribution,
     EventDataset,
     SoftRiskTag,
+    SymbolEventScoringResult,
     dataset_for_event,
     event_age_days,
     score_symbol_events,
@@ -46,6 +47,8 @@ class EventEnrichmentResult:
     base_ranking: list[str]
     event_ranking: list[str] = field(default_factory=list)
     enhanced_ranking: list[str] = field(default_factory=list)
+    portfolio_ranking: list[str] = field(default_factory=list)
+    portfolio_scores: dict[str, float] = field(default_factory=dict)
     event_contributions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     risk_flags: dict[str, list[str]] = field(default_factory=dict)
     event_dataset_versions: dict[str, dict[str, Any] | None] = field(default_factory=dict)
@@ -153,6 +156,51 @@ def _event_pit_level(events: list[MarketEvent]) -> str:
     return "mixed"
 
 
+def _event_score_sort_key(result: SymbolEventScoringResult) -> tuple:
+    if result.event_score is None:
+        return (1, 0.0, result.symbol)
+    return (0, -result.event_score, result.symbol)
+
+
+def _build_rankings(
+    *,
+    candidates: list[str],
+    base_ranking: list[str],
+    base_scores: dict[str, float],
+    scored_results: list[SymbolEventScoringResult],
+) -> tuple[list[str], list[str], list[str], dict[str, float]]:
+    results_by_symbol = {item.symbol: item for item in scored_results}
+    excluded_hard_risk = {
+        item.symbol for item in scored_results if item.hard_risk_excluded
+    }
+    eligible = [symbol for symbol in candidates if symbol not in excluded_hard_risk]
+
+    event_ranking = sorted(
+        eligible,
+        key=lambda symbol: _event_score_sort_key(results_by_symbol[symbol]),
+    )
+    enhanced_ordered = [
+        item.symbol for item in sort_enhanced_ranking(scored_results)
+        if item.symbol in candidates
+    ]
+    fallback = [
+        symbol
+        for symbol in base_ranking
+        if symbol in eligible and symbol not in enhanced_ordered
+    ]
+    enhanced_ranking = enhanced_ordered + fallback
+
+    portfolio_scores: dict[str, float] = {}
+    for symbol in enhanced_ranking:
+        result = results_by_symbol[symbol]
+        if result.enhanced_score is not None:
+            portfolio_scores[symbol] = result.enhanced_score
+        else:
+            portfolio_scores[symbol] = base_scores.get(symbol, 0.0)
+
+    return event_ranking, enhanced_ranking, enhanced_ranking, portfolio_scores
+
+
 def enrich_ranking_with_events(
     repo: MarketDataRepository,
     config: ScreenerConfig,
@@ -180,11 +228,11 @@ def enrich_ranking_with_events(
     if filtered_events:
         placeholders = ", ".join("?" for _ in candidates)
         link_rows = repo.connection.execute(
-            f"""SELECT event_id, symbol
+            f"""SELECT l.event_id, l.symbol
                 FROM event_symbol_links l
-                LEFT JOIN dataset_versions v ON l.dataset_version_id = v.version_id
-                WHERE symbol IN ({placeholders})
-                  AND (l.dataset_version_id IS NULL OR v.status = 'PUBLISHED')""",
+                INNER JOIN dataset_versions v ON l.dataset_version_id = v.version_id
+                WHERE l.symbol IN ({placeholders})
+                  AND v.status = 'PUBLISHED'""",
             candidates,
         ).fetchall()
         links_by_event: dict[str, set[str]] = {}
@@ -208,9 +256,11 @@ def enrich_ranking_with_events(
         global_degradations.append(historical_error)
     for flag_name, dataset in REQUIRED_DATASET_MAP.items():
         if getattr(cfg, flag_name) and dataset not in present_datasets:
-            enrichment_errors.append(f"required dataset {DATASET_REPORT_KEYS[dataset]} missing")
+            enrichment_errors.append(
+                f"required dataset {DATASET_REPORT_KEYS[dataset]} missing"
+            )
 
-    scored_results = []
+    scored_results: list[SymbolEventScoringResult] = []
     contributions: dict[str, list[dict[str, Any]]] = {}
     risk_flags: dict[str, list[str]] = {}
     degradations_by_symbol: dict[str, list[str]] = {}
@@ -240,34 +290,28 @@ def enrich_ranking_with_events(
         if symbol_degradations:
             degradations_by_symbol[symbol] = symbol_degradations
 
-    event_ranking = sorted(
-        candidates,
-        key=lambda symbol: (
-            next(
-                (item.event_score for item in scored_results if item.symbol == symbol),
-                None,
-            ) is None,
-            -(next(
-                (item.event_score for item in scored_results if item.symbol == symbol),
-                float("-inf"),
-            ) or float("-inf")),
-            symbol,
-        ),
+    event_ranking, enhanced_ranking, portfolio_ranking, portfolio_scores = _build_rankings(
+        candidates=candidates,
+        base_ranking=base_ranking,
+        base_scores=base_scores,
+        scored_results=scored_results,
     )
-    enhanced_ranking = [
-        item.symbol for item in sort_enhanced_ranking(scored_results) if item.symbol in candidates
-    ]
+
+    versions = _event_dataset_versions(repo, present_datasets)
+    degradations = _merge_degradations(global_degradations, degradations_by_symbol)
 
     if enrichment_errors:
         return EventEnrichmentResult(
             base_ranking=base_ranking,
-            event_ranking=base_ranking[: len(candidates)],
-            enhanced_ranking=base_ranking,
+            event_ranking=[],
+            enhanced_ranking=[],
+            portfolio_ranking=[],
+            portfolio_scores={},
             event_contributions=contributions,
             risk_flags=risk_flags,
-            event_dataset_versions=_event_dataset_versions(repo),
+            event_dataset_versions=versions,
             event_data_sources=_collect_dataset_sources(filtered_events),
-            event_degradations=_merge_degradations(global_degradations, degradations_by_symbol),
+            event_degradations=degradations,
             event_pit_level=_event_pit_level(filtered_events),
             event_enrichment_errors=enrichment_errors,
         )
@@ -275,20 +319,28 @@ def enrich_ranking_with_events(
     return EventEnrichmentResult(
         base_ranking=base_ranking,
         event_ranking=event_ranking,
-        enhanced_ranking=enhanced_ranking or list(base_ranking),
+        enhanced_ranking=enhanced_ranking,
+        portfolio_ranking=portfolio_ranking,
+        portfolio_scores=portfolio_scores,
         event_contributions=contributions,
         risk_flags=risk_flags,
-        event_dataset_versions=_event_dataset_versions(repo),
+        event_dataset_versions=versions,
         event_data_sources=_collect_dataset_sources(filtered_events),
-        event_degradations=_merge_degradations(global_degradations, degradations_by_symbol),
+        event_degradations=degradations,
         event_pit_level=_event_pit_level(filtered_events),
         event_enrichment_errors=enrichment_errors,
     )
 
 
-def _event_dataset_versions(repo: MarketDataRepository) -> dict[str, dict[str, Any] | None]:
+def _event_dataset_versions(
+    repo: MarketDataRepository,
+    present_datasets: set[EventDataset],
+) -> dict[str, dict[str, Any] | None]:
     version = repo.get_latest_published_version("market_events")
-    return {key: version for key in DATASET_REPORT_KEYS.values()}
+    return {
+        DATASET_REPORT_KEYS[dataset]: (version if dataset in present_datasets else None)
+        for dataset in EventDataset
+    }
 
 
 def _merge_degradations(

@@ -48,11 +48,13 @@ def deduplicate_event_bundles(bundles: list[EventBundle]) -> tuple[list[EventBun
         if stable in seen_stable:
             physical += 1
             continue
-        record_key = f"{event.source}:{event.source_record_id}"
+        record_key = stable_event_id(event)
         if record_key in seen_record:
             physical += 1
             continue
-        url_key = _canonical_url(event.source_url) if event.source_url else ""
+        url_key = ""
+        if event.source_url:
+            url_key = f"{_canonical_url(event.source_url)}|{event.source_version or 'v0'}"
         if url_key and url_key in seen_url:
             physical += 1
             continue

@@ -63,6 +63,18 @@ def test_dedup_prefers_stable_source_id_over_semantic_duplicate():
     assert stats.physical_duplicates == 1
 
 
+def test_dedup_keeps_revision_with_new_source_version():
+    first = _bundle(_event("evt-old", "rev-1", "Original bulletin"))
+    revised = _event("evt-new", "rev-1", "Revised bulletin").model_copy(update={
+        "source_version": "v2",
+        "content_hash": "hash-new",
+        "supersedes_event_id": "evt-old",
+    })
+    kept, stats = deduplicate_event_bundles([first, _bundle(revised)])
+    assert len(kept) == 2
+    assert stats.physical_duplicates == 0
+
+
 def test_dedup_counts_semantic_title_time_symbol_duplicates():
     first = _bundle(_event("evt-1", "a", "Same title"))
     second = _event("evt-2", "b", "Same title")

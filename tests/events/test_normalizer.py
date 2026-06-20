@@ -7,11 +7,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from tradingagents.events.contracts import EventSentiment, EventType
+from tradingagents.events.contracts import EventSentiment, EventSeverity, EventType
 from tradingagents.events.normalizer import (
     classify_event_type,
     conservative_available_at,
     infer_sentiment,
+    infer_severity,
     normalize_announcement_row,
     normalize_symbol,
     sanitize_event_url,
@@ -29,6 +30,12 @@ def test_classify_and_sentiment_for_penalty_title():
     title = "关于收到行政处罚决定书"
     assert classify_event_type(title) == EventType.PENALTY
     assert infer_sentiment(title) == EventSentiment.NEGATIVE
+
+
+def test_infer_severity_marks_st_and_investigation_critical():
+    assert infer_severity("关于公司股票被实施退市风险警示", EventType.ST_DELIST) == EventSeverity.CRITICAL
+    assert infer_severity("关于收到立案调查通知书", EventType.INVESTIGATION) == EventSeverity.CRITICAL
+    assert infer_severity("关于收到重大行政处罚决定书", EventType.PENALTY) == EventSeverity.CRITICAL
 
 
 def test_conservative_available_at_uses_next_open_day():

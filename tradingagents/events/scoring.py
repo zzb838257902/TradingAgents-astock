@@ -386,8 +386,10 @@ def score_symbol_events(
 
 
 def sort_enhanced_ranking(results: Iterable[SymbolEventScoringResult]) -> list[SymbolEventScoringResult]:
-    eligible = [item for item in results if item.enhanced_score is not None]
-    ineligible = [item for item in results if item.enhanced_score is None]
+    eligible = [
+        item for item in results
+        if item.enhanced_score is not None and not item.hard_risk_excluded
+    ]
     eligible.sort(
         key=lambda item: (
             -item.enhanced_score,
@@ -395,5 +397,4 @@ def sort_enhanced_ranking(results: Iterable[SymbolEventScoringResult]) -> list[S
             item.symbol,
         ),
     )
-    ineligible.sort(key=lambda item: item.symbol)
-    return eligible + ineligible
+    return eligible
