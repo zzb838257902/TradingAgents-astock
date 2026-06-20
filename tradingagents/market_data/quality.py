@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
+
+from tradingagents.market_data.financials import next_open_trading_day
+
+# Max calendar-day gap between requested_start and the first returned session
+# when treating the mismatch as a non-trading-day start (holiday/weekend).
+_MAX_NON_TRADING_START_GAP = timedelta(days=10)
 
 
 @dataclass(frozen=True)
@@ -134,6 +140,34 @@ def build_backfill_completeness_report(
     )
 
 
+def effective_trade_calendar_end(requested_end: date) -> date:
+    """Last weekday on or before requested_end (no holiday table)."""
+    candidate = requested_end
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _covers_trade_calendar_start(
+    *,
+    requested_start: date,
+    actual_start: date,
+    actual_open_dates: list[date],
+) -> bool:
+    ideal_start = next_open_trading_day(requested_start - timedelta(days=1))
+    if actual_start <= ideal_start:
+        return True
+    first_in_range = min(
+        (day for day in actual_open_dates if requested_start <= day),
+        default=None,
+    )
+    if first_in_range is None:
+        return False
+    if actual_start != first_in_range:
+        return False
+    return (actual_start - requested_start) <= _MAX_NON_TRADING_START_GAP
+
+
 def build_trade_calendar_range_report(
     requested_start: date,
     requested_end: date,
@@ -141,6 +175,13 @@ def build_trade_calendar_range_report(
     *,
     source_limit_bars: int,
 ) -> CoverageReport:
+    effective_end = effective_trade_calendar_end(requested_end)
+    base_details = {
+        "requested_start": requested_start.isoformat(),
+        "requested_end": requested_end.isoformat(),
+        "effective_end": effective_end.isoformat(),
+        "source_limit_bars": source_limit_bars,
+    }
     if not actual_open_dates:
         return CoverageReport(
             dataset="trade_calendar_range",
@@ -149,30 +190,31 @@ def build_trade_calendar_range_report(
             denominator=1,
             ratio=0.0,
             threshold=1.0,
-            details=[{
-                "requested_start": requested_start.isoformat(),
-                "requested_end": requested_end.isoformat(),
-                "source_limit_bars": source_limit_bars,
-            }],
+            details=[base_details],
         )
     actual_start = min(actual_open_dates)
     actual_end = max(actual_open_dates)
-    covers_start = actual_start <= requested_start
-    status = "pass" if covers_start else "fail"
+    covers_start = _covers_trade_calendar_start(
+        requested_start=requested_start,
+        actual_start=actual_start,
+        actual_open_dates=actual_open_dates,
+    )
+    covers_end = actual_end >= effective_end
+    covers = covers_start and covers_end
     return CoverageReport(
         dataset="trade_calendar_range",
-        status=status,
-        numerator=1 if covers_start else 0,
+        status="pass" if covers else "fail",
+        numerator=1 if covers else 0,
         denominator=1,
-        ratio=1.0 if covers_start else 0.0,
+        ratio=1.0 if covers else 0.0,
         threshold=1.0,
         details=[{
-            "requested_start": requested_start.isoformat(),
-            "requested_end": requested_end.isoformat(),
+            **base_details,
             "actual_start": actual_start.isoformat(),
             "actual_end": actual_end.isoformat(),
             "actual_count": len(actual_open_dates),
-            "source_limit_bars": source_limit_bars,
+            "covers_start": covers_start,
+            "covers_end": covers_end,
         }],
     )
 

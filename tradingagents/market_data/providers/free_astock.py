@@ -428,13 +428,6 @@ class FreeAStockProvider:
             ]
         except Exception as exc:
             errors.append(f"security_master: {exc}")
-        try:
-            open_dates = self._backend.fetch_sse_trade_dates(
-                date(1990, 1, 1),
-                run_time.date(),
-            )
-        except Exception:
-            open_dates = None
 
         for dataset, endpoint, pit_level, license_note in _PROBE_SPECS:
             permitted = False

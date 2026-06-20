@@ -206,6 +206,86 @@ def test_trade_calendar_range_report_blocks_early_start():
     )
     assert report.status == "fail"
     assert report.details[0]["actual_start"] == "2023-03-01"
+    assert report.details[0]["covers_start"] is False
+
+
+def test_trade_calendar_range_report_passes_holiday_start():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 31)],
+        source_limit_bars=800,
+    )
+    assert report.status == "pass"
+    assert report.details[0]["covers_start"] is True
+    assert report.details[0]["covers_end"] is True
+
+
+def test_trade_calendar_range_report_blocks_stale_end():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        [date(2026, 1, 2), date(2026, 1, 5)],
+        source_limit_bars=800,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["covers_start"] is True
+    assert report.details[0]["covers_end"] is False
+
+
+def test_trade_calendar_range_report_empty_calendar_details():
+    report = build_trade_calendar_range_report(
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        [],
+        source_limit_bars=800,
+    )
+    assert report.status == "fail"
+    assert "actual_start" not in report.details[0]
+    assert report.details[0]["effective_end"] == "2026-01-30"
+
+
+class _EmptyCalendarProvider(MarketDataProvider):
+    name = "fixture_empty_calendar"
+
+    def probe_capabilities(self):
+        run_time = datetime.now(tz=SHANGHAI)
+        from tradingagents.market_data.contracts import ProviderCapability
+
+        return DataResult(
+            data=[ProviderCapability(
+                dataset="trade_calendar",
+                endpoint="trade_cal",
+                permitted=True,
+                pit_level=PITLevel.PIT_REQUIRED,
+                probed_at=run_time,
+            )],
+            status=DataStatus.OK,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+        )
+
+    def get_trade_calendar(self, start, end):
+        run_time = datetime.now(tz=SHANGHAI)
+        return DataResult(
+            data=[],
+            status=DataStatus.EMPTY,
+            source=self.name,
+            as_of=run_time,
+            available_at=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+        )
+
+
+def test_sync_trade_calendar_empty_calendar_returns_blocked_not_keyerror(tmp_path):
+    paths = MarketDataPaths(home_dir=tmp_path)
+    repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    sync = MarketDataSync(repo, _EmptyCalendarProvider(), paths)
+    result = sync.sync_trade_calendar(date(2026, 1, 1), date(2026, 1, 31))
+    assert result.status == SyncStatus.BLOCKED
+    assert "no open days" in result.errors[0]
 
 
 def test_financial_symbol_coverage_uses_target_symbol_denominator():

@@ -1455,7 +1455,7 @@ def get_profit_forecast(
                         else:
                             lines.append(
                                 f"EPS declining ({cagr * 100:.0f}%), "
-                                f"PEG not applicable"
+                                "PEG not applicable"
                             )
         except Exception as e:
             logger.warning("Forward PE calc failed for %s: %s", code, e)
@@ -1484,7 +1484,7 @@ def get_hot_stocks(
 
     try:
         url = (
-            f"http://zx.10jqka.com.cn/event/api/getharden/"
+            "http://zx.10jqka.com.cn/event/api/getharden/"
             f"date/{curr_date}/orderby/date/orderway/desc/charset/GBK/"
         )
         headers = {
@@ -1538,7 +1538,7 @@ def get_hot_stocks(
 
         if all_tags:
             cnt = Counter(all_tags)
-            lines.append(f"\n## Theme Frequency (top 15)")
+            lines.append("\n## Theme Frequency (top 15)")
             for tag, n in cnt.most_common(15):
                 lines.append(f"  {tag}: {n} stocks")
 
@@ -1760,7 +1760,7 @@ def get_concept_blocks(
 
         lines = [
             f"# Concept & Sector Blocks for {code} (A-stock)",
-            f"# Source: 百度股市通 (Baidu PAE)",
+            "# Source: 百度股市通 (Baidu PAE)",
             f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
         ]
@@ -1813,7 +1813,7 @@ def get_fund_flow(
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     lines = [
         f"# Fund Flow for {code} (A-stock)",
-        f"# Source: 东财 push2 (Eastmoney)",
+        "# Source: 东财 push2 (Eastmoney)",
         f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
     ]

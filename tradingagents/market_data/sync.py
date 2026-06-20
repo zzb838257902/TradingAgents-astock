@@ -36,6 +36,41 @@ FINANCIAL_FIELD_QUALITY_THRESHOLD = 0.99
 SECURITY_COVERAGE_THRESHOLD = 0.99
 
 
+def _trade_calendar_range_error(
+    range_report: CoverageReport,
+    start: date,
+    end: date,
+) -> str:
+    details = range_report.details[0] if range_report.details else {}
+    effective_end = details.get("effective_end", end.isoformat())
+    actual_start = details.get("actual_start")
+    actual_end = details.get("actual_end")
+    if actual_start is None and actual_end is None:
+        return (
+            "trade calendar source returned no open days for "
+            f"{start.isoformat()}..{end.isoformat()} "
+            f"(Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
+        )
+    parts: list[str] = []
+    if details.get("covers_start") is False:
+        parts.append(
+            "start gap: requested from "
+            f"{start.isoformat()}, actual from {actual_start}"
+        )
+    if details.get("covers_end") is False:
+        parts.append(
+            "end gap: requested through "
+            f"{effective_end}, actual through {actual_end}"
+        )
+    if not parts:
+        parts.append(f"requested {start.isoformat()}..{end.isoformat()}")
+    return (
+        "trade calendar source does not cover requested range: "
+        + "; ".join(parts)
+        + f" (Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
+    )
+
+
 class SyncStatus(StrEnum):
     PUBLISHED = "published"
     ERROR = "error"
@@ -185,12 +220,7 @@ class MarketDataSync:
             return SyncResult(
                 dataset="trade_calendar",
                 status=SyncStatus.BLOCKED,
-                errors=[
-                    "trade calendar source does not cover requested start: "
-                    f"requested {start.isoformat()}, actual from "
-                    f"{range_report.details[0]['actual_start']} "
-                    f"(Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
-                ],
+                errors=[_trade_calendar_range_error(range_report, start, end)],
                 coverage_reports={"trade_calendar_range": range_report},
             )
         run_id = self.repository.begin_ingestion_run(
