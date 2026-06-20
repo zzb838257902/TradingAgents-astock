@@ -58,6 +58,17 @@ def _parse_sync_window_date(value: Any) -> date | None:
     return date.fromisoformat(text[:10])
 
 
+def _empty_sync_coverage_payload(params: dict[str, Any]) -> dict[str, Any]:
+    symbols = params.get("symbols") or []
+    return {
+        "dataset": params.get("dataset"),
+        "symbols": sorted(str(symbol) for symbol in symbols),
+        "start": params.get("start"),
+        "end": params.get("end"),
+        "success_empty": bool(params.get("success_empty")),
+    }
+
+
 def _sanitize_request_params(params: dict[str, Any]) -> dict[str, Any]:
     redacted = {}
     for key, value in params.items():
@@ -1059,7 +1070,7 @@ class MarketDataRepository:
                 [run_id],
             ).fetchone()
             if row is not None:
-                payload["params"] = json.loads(row[0])
+                payload["coverage"] = _empty_sync_coverage_payload(json.loads(row[0]))
         return _hash_payload(payload)
 
     def _copy_staging_event_bundle(self, run_id: str, version_id: str) -> None:

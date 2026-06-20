@@ -234,6 +234,31 @@ def test_empty_bundle_hash_includes_query_params(tmp_path):
     assert first_version != second_version
 
 
+def test_identical_empty_sync_is_idempotent(tmp_path):
+    repo = MarketDataRepository(tmp_path / "market.duckdb")
+    base_params = {
+        "dataset": "official_announcements",
+        "symbols": ["600001", "600000"],
+        "start": "2026-06-01",
+        "end": "2026-06-30",
+        "success_empty": True,
+    }
+    first_run = repo.begin_ingestion_run(
+        "market_events",
+        {**base_params, "as_of": "2026-06-20T10:00:00+08:00"},
+    )
+    repo.upsert_staging_event_bundle(first_run, events=[], links=[], tags=[])
+    first_version = repo.publish_event_bundle(first_run)
+
+    second_run = repo.begin_ingestion_run(
+        "market_events",
+        {**base_params, "as_of": "2026-06-20T16:00:00+08:00"},
+    )
+    repo.upsert_staging_event_bundle(second_run, events=[], links=[], tags=[])
+    second_version = repo.publish_event_bundle(second_run)
+    assert first_version == second_version
+
+
 def test_success_empty_announcement_sync_requires_pit_coverage(tmp_path):
     repo = MarketDataRepository(tmp_path / "market.duckdb")
     signal_time = datetime(2025, 12, 18, 15, 30, tzinfo=SHANGHAI)
