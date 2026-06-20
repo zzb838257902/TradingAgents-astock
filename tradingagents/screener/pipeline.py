@@ -12,7 +12,11 @@ from tradingagents.backtest.engine import BacktestEngine
 from tradingagents.backtest.execution import ExecutionModel
 from tradingagents.backtest.limits import enrich_bars_with_limits
 from tradingagents.backtest.metrics import performance_metrics
-from tradingagents.market_data.contracts import PITLevel
+from tradingagents.market_data.adjustments import (
+    build_forward_adjusted_closes,
+    latest_factor_on_or_before,
+)
+from tradingagents.market_data.contracts import PITLevel, PriceBasis
 from tradingagents.market_data.fixture_store import load_fixture_into_repository
 from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.pit import require_pit_required
@@ -73,10 +77,23 @@ def _collect_dataset_versions(repo: MarketDataRepository) -> dict[str, dict | No
 
 def _collect_data_sources(fixture: dict, repo: MarketDataRepository, signal_time: datetime) -> dict[str, str]:
     sources = {"daily_bars": "fixture", "financials": "fixture"}
-    securities = repo.get_effective_securities(signal_time.date(), signal_time)
+    securities = repo.get_effective_securities_for_screening(signal_time.date(), signal_time)
     if securities:
         sources["security_master"] = securities[0].source
     return sources
+
+
+def _screening_pit_level(config: ScreenerConfig, resolved_pit_level: str) -> str:
+    if config.strategy.price_basis == PriceBasis.RAW:
+        return PITLevel.BEST_EFFORT.value
+    return resolved_pit_level
+
+
+def _data_quality(config: ScreenerConfig) -> dict[str, str | bool]:
+    quality: dict[str, str | bool] = {"price_basis": config.strategy.price_basis.value}
+    if config.strategy.price_basis == PriceBasis.RAW:
+        quality["experimental_not_for_formal_evaluation"] = True
+    return quality
 
 
 def _base_report(
@@ -91,6 +108,7 @@ def _base_report(
     excluded_reasons: dict[str, list[str]] | None = None,
     status: ScreeningStatus = ScreeningStatus.OK,
     errors: list[str] | None = None,
+    data_quality: dict | None = None,
 ) -> RunReport:
     excluded = excluded_reasons or {}
     return RunReport(
@@ -100,6 +118,7 @@ def _base_report(
         data_as_of=signal_time,
         dataset_versions=dataset_versions or {},
         data_sources=data_sources or {},
+        data_quality=data_quality or {},
         pit_level=pit_level,
         universe_type=universe_request.universe_type.value,
         universe_code=universe_request.universe_code,
@@ -155,9 +174,13 @@ def run_screen(
     )
     dataset_versions = _collect_dataset_versions(repo)
     data_sources = _collect_data_sources(fixture, repo, signal_time)
+    data_quality = _data_quality(config)
 
     resolved = UniverseResolver(repo).resolve(request.model_copy(update={"as_of": signal_time}))
-    pit_level = resolved.pit_level.value if resolved.pit_level else PITLevel.PIT_REQUIRED.value
+    pit_level = _screening_pit_level(
+        config,
+        resolved.pit_level.value if resolved.pit_level else PITLevel.PIT_REQUIRED.value,
+    )
     if not resolved.is_ok:
         return _base_report(
             run_id=run,
@@ -169,10 +192,11 @@ def run_screen(
             data_sources=data_sources,
             status=ScreeningStatus.DATA_ERROR,
             errors=resolved.errors,
+            data_quality=data_quality,
         )
 
     symbol_meta = {item["symbol"]: item for item in fixture["symbols"]}
-    effective = repo.get_effective_securities(signal_date, signal_time)
+    effective = repo.get_effective_securities_for_screening(signal_date, signal_time)
     allowed = set(resolved.symbols) if request.universe_type != UniverseType.ALL else None
     if allowed is not None:
         effective = [record for record in effective if record.symbol in allowed]
@@ -234,11 +258,49 @@ def run_screen(
             data_sources=data_sources,
             excluded_reasons=universe.excluded_reasons,
             status=ScreeningStatus.EMPTY_UNIVERSE,
+            data_quality=data_quality,
         )
 
     included_symbols = {item.symbol for item in universe.included}
     financial_rows = repo.get_financials(list(included_symbols), available_before=signal_time)
     fin_by_symbol = {row["symbol"]: row for row in financial_rows}
+
+    factor_rows_by_symbol: dict[str, list[dict]] = {}
+    if config.strategy.price_basis == PriceBasis.FORWARD_ADJUSTED:
+        for row in repo.get_adjustment_factors(
+            list(included_symbols),
+            end=signal_date,
+            available_before=signal_time,
+        ):
+            factor_rows_by_symbol.setdefault(row["symbol"], []).append(row)
+        covered = {
+            symbol
+            for symbol in included_symbols
+            if latest_factor_on_or_before(
+                factor_rows_by_symbol.get(symbol, []),
+                signal_date,
+                signal_time,
+            )
+            is not None
+        }
+        missing = sorted(included_symbols - covered)
+        if missing:
+            return _base_report(
+                run_id=run,
+                signal_time=signal_time,
+                universe_request=request,
+                universe_size=universe_size,
+                pit_level=pit_level,
+                dataset_versions=dataset_versions,
+                data_sources=data_sources,
+                excluded_reasons=universe.excluded_reasons,
+                status=ScreeningStatus.DATA_ERROR,
+                errors=[
+                    "forward_adjusted requires adjustment factor coverage for all included symbols; "
+                    f"missing: {', '.join(missing)}"
+                ],
+                data_quality=data_quality,
+            )
 
     raw_momentum: dict[str, float] = {}
     raw_quality: dict[str, float] = {}
@@ -247,12 +309,21 @@ def run_screen(
     for item in universe.included:
         symbol = item.symbol
         history = sorted(daily_by_symbol[symbol], key=lambda row: _parse_trade_date(row["trade_date"]))
-        closes = [row["close"] for row in history]
-        if len(closes) < 3:
+        if len(history) < 3:
             continue
+        trade_dates = [_parse_trade_date(row["trade_date"]) for row in history]
+        if config.strategy.price_basis == PriceBasis.FORWARD_ADJUSTED:
+            closes = build_forward_adjusted_closes(
+                history,
+                factor_rows_by_symbol.get(symbol, []),
+                signal_date,
+                signal_time,
+            )
+        else:
+            closes = [row["close"] for row in history]
         close_series = pd.Series(
             closes,
-            index=pd.to_datetime([_parse_trade_date(row["trade_date"]).isoformat() for row in history]),
+            index=pd.to_datetime([day.isoformat() for day in trade_dates]),
         )
         signal_key = signal_date.isoformat()
         raw_momentum[symbol] = compute_momentum(close_series, signal_key, lookback=2)
@@ -281,6 +352,7 @@ def run_screen(
             data_sources=data_sources,
             excluded_reasons=universe.excluded_reasons,
             status=ScreeningStatus.EMPTY_UNIVERSE,
+            data_quality=data_quality,
         )
 
     momentum_scores = rank_score(pd.Series(raw_momentum))
@@ -355,6 +427,7 @@ def run_screen(
         data_as_of=signal_time,
         dataset_versions=dataset_versions,
         data_sources=data_sources,
+        data_quality=data_quality,
         pit_level=pit_level,
         universe_type=request.universe_type.value,
         universe_code=request.universe_code,

@@ -121,6 +121,141 @@ class MarketDataRepository:
             for row in rows
         ]
 
+    def upsert_security_master_snapshot(
+        self,
+        snapshot_date: date,
+        records: Iterable[SecurityRecord],
+    ) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                snapshot_date,
+                record.symbol,
+                record.name,
+                record.board,
+                record.list_date,
+                record.delist_date,
+                record.status,
+                record.st_flag,
+                record.available_at,
+                record.source,
+                now,
+            )
+            for record in records
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO security_master_snapshots
+               (snapshot_date, symbol, name, board, list_date, delist_date, status,
+                st_flag, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def list_security_snapshot_dates(self, through: date | None = None) -> list[date]:
+        if through is None:
+            rows = self.connection.execute(
+                """SELECT DISTINCT snapshot_date
+                   FROM security_master_snapshots
+                   ORDER BY snapshot_date"""
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """SELECT DISTINCT snapshot_date
+                   FROM security_master_snapshots
+                   WHERE snapshot_date <= ?
+                   ORDER BY snapshot_date""",
+                [through],
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def has_security_snapshot_on(self, snapshot_date: date) -> bool:
+        row = self.connection.execute(
+            """SELECT 1 FROM security_master_snapshots
+               WHERE snapshot_date = ? LIMIT 1""",
+            [snapshot_date],
+        ).fetchone()
+        return row is not None
+
+    def get_latest_security_snapshot_on_or_before(self, as_of: date) -> date | None:
+        row = self.connection.execute(
+            """SELECT MAX(snapshot_date)
+               FROM security_master_snapshots
+               WHERE snapshot_date <= ?""",
+            [as_of],
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def get_effective_securities_from_snapshot(
+        self,
+        snapshot_date: date,
+        as_of: date,
+        available_before: datetime,
+    ) -> list[SecurityRecord]:
+        rows = self.connection.execute(
+            """SELECT symbol, name, board, list_date, delist_date, status,
+                      st_flag, available_at, source
+               FROM security_master_snapshots
+               WHERE snapshot_date = ?
+                 AND list_date <= ?
+                 AND (delist_date IS NULL OR delist_date > ?)
+                 AND available_at <= ?
+               ORDER BY symbol""",
+            [snapshot_date, as_of, as_of, available_before],
+        ).fetchall()
+        return [
+            SecurityRecord(
+                symbol=row[0],
+                name=row[1],
+                board=row[2],
+                valid_from=row[3],
+                valid_to=row[4],
+                list_date=row[3],
+                delist_date=row[4],
+                status=row[5],
+                st_flag=row[6],
+                available_at=row[7],
+                source=row[8],
+            )
+            for row in rows
+        ]
+
+    def screening_security_snapshot_error(self, as_of: date) -> str | None:
+        """Return error message when formal historical screening lacks a daily snapshot."""
+        today = datetime.now(tz=SHANGHAI).date()
+        if as_of < today and not self.has_security_snapshot_on(as_of):
+            return (
+                f"formal historical screening requires security_master snapshot on {as_of.isoformat()}"
+            )
+        return None
+
+    def get_effective_securities_for_screening(
+        self, as_of: date, available_before: datetime
+    ) -> list[SecurityRecord]:
+        """Same-day live pool from securities; historical as_of from daily snapshot."""
+        today = datetime.now(tz=SHANGHAI).date()
+        if as_of < today:
+            return self.get_effective_securities_from_snapshot(
+                as_of, as_of, available_before
+            )
+        return self.get_effective_securities(as_of, available_before)
+
+    def seed_security_snapshot_for_date(
+        self,
+        snapshot_date: date,
+        available_before: datetime | None = None,
+    ) -> None:
+        """Persist securities-table effective pool as a daily snapshot (tests/sync helper)."""
+        if available_before is None:
+            available_before = datetime.combine(
+                snapshot_date,
+                datetime.min.time().replace(hour=15, minute=30),
+                tzinfo=SHANGHAI,
+            )
+        records = self.get_effective_securities(snapshot_date, available_before)
+        self.upsert_security_master_snapshot(snapshot_date, records)
+
     def upsert_daily_bars(self, bars: Iterable[dict]) -> None:
         rows = [
             (
@@ -342,6 +477,120 @@ class MarketDataRepository:
             rows,
         )
 
+    def upsert_staging_financials(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        open_dates = self.list_open_trade_dates()
+        values = []
+        for row in rows:
+            normalized = normalize_financial_row(row, open_dates=open_dates or None)
+            values.append((
+                run_id,
+                normalized["symbol"],
+                normalized["report_period"],
+                normalized["roe"],
+                normalized["operating_cashflow"],
+                normalized["net_profit"],
+                normalized["debt_ratio"],
+                normalized["announcement_date"],
+                normalized["actual_announcement_time"],
+                normalized["available_at"],
+                normalized["update_flag"],
+                normalized["source_version"],
+                normalized["record_type"],
+                normalized["source"],
+                normalized.get("ingested_at", now),
+            ))
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_financials
+               (run_id, symbol, report_period, roe, operating_cashflow, net_profit,
+                debt_ratio, announcement_date, actual_announcement_time, available_at,
+                update_flag, source_version, record_type, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def upsert_staging_adjustment_factors(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                run_id,
+                row["symbol"],
+                row["trade_date"],
+                row["factor"],
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", now),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_adjustment_factors
+               (run_id, symbol, trade_date, factor, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def upsert_staging_corporate_actions(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                run_id,
+                row["symbol"],
+                row["ex_date"],
+                row["action_type"],
+                row.get("cash_div"),
+                row.get("stock_div"),
+                row.get("split_ratio"),
+                row.get("rights_ratio"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", now),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_corporate_actions
+               (run_id, symbol, ex_date, action_type, cash_div, stock_div,
+                split_ratio, rights_ratio, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def upsert_staging_board_memberships(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                run_id,
+                row["board_type"],
+                row["board_code"],
+                row["symbol"],
+                row["membership_mode"],
+                row.get("effective_from"),
+                row.get("effective_to"),
+                row.get("snapshot_date"),
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", now),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_board_memberships
+               (run_id, board_type, board_code, symbol, membership_mode,
+                effective_from, effective_to, snapshot_date, available_at, source,
+                ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
     def find_published_version_by_hash(
         self, dataset: str, content_hash: str
     ) -> dict[str, Any] | None:
@@ -396,6 +645,13 @@ class MarketDataRepository:
             self._copy_staging_securities(run_id, version_id)
         elif dataset == "trade_calendar":
             self._copy_staging_trade_calendar(run_id, version_id)
+        elif dataset == "financials":
+            self._copy_staging_financials(run_id, version_id)
+        elif dataset == "adjustment_factors":
+            self._copy_staging_adjustment_factors(run_id, version_id)
+            self._copy_staging_corporate_actions(run_id, version_id)
+        elif dataset in {"industry_members", "concept_members", "index_members"}:
+            self._copy_staging_board_memberships(run_id, version_id)
         else:
             raise ValueError(f"unsupported dataset for publish: {dataset}")
 
@@ -436,6 +692,38 @@ class MarketDataRepository:
                 """SELECT exchange, trade_date, is_open, available_at, source
                    FROM staging_trade_calendar WHERE run_id = ?
                    ORDER BY exchange, trade_date""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "financials":
+            rows = self.connection.execute(
+                """SELECT symbol, report_period, roe, operating_cashflow, net_profit,
+                          debt_ratio, announcement_date, actual_announcement_time,
+                          available_at, update_flag, source_version, record_type, source
+                   FROM staging_financials WHERE run_id = ?
+                   ORDER BY symbol, report_period, announcement_date""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "adjustment_factors":
+            factor_rows = self.connection.execute(
+                """SELECT symbol, trade_date, factor, available_at, source
+                   FROM staging_adjustment_factors WHERE run_id = ?
+                   ORDER BY symbol, trade_date""",
+                [run_id],
+            ).fetchall()
+            action_rows = self.connection.execute(
+                """SELECT symbol, ex_date, action_type, cash_div, stock_div,
+                          split_ratio, rights_ratio, available_at, source
+                   FROM staging_corporate_actions WHERE run_id = ?
+                   ORDER BY symbol, ex_date, action_type""",
+                [run_id],
+            ).fetchall()
+            rows = factor_rows + [("actions", *row) for row in action_rows]
+        elif dataset in {"industry_members", "concept_members", "index_members"}:
+            rows = self.connection.execute(
+                """SELECT board_type, board_code, symbol, membership_mode,
+                          effective_from, effective_to, snapshot_date, available_at, source
+                   FROM staging_board_memberships WHERE run_id = ?
+                   ORDER BY board_type, board_code, symbol, effective_from""",
                 [run_id],
             ).fetchall()
         else:
@@ -502,11 +790,87 @@ class MarketDataRepository:
             ],
         )
 
+    def _copy_staging_financials(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            f"""SELECT {', '.join(_FINANCIAL_COLUMNS)}, ingested_at
+               FROM staging_financials WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            f"""INSERT OR REPLACE INTO financials
+               ({', '.join(_FINANCIAL_COLUMNS)}, ingested_at, dataset_version_id)
+               VALUES ({', '.join('?' for _ in range(15))})""",
+            [(*row[:13], row[13], version_id) for row in staging_rows],
+        )
+
+    def _copy_staging_adjustment_factors(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT symbol, trade_date, factor, available_at, source, ingested_at
+               FROM staging_adjustment_factors WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO adjustment_factors
+               (symbol, trade_date, factor, available_at, source, ingested_at,
+                dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:6], version_id) for row in staging_rows],
+        )
+
+    def _copy_staging_corporate_actions(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
+                      rights_ratio, available_at, source, ingested_at
+               FROM staging_corporate_actions WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO corporate_actions
+               (symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
+                rights_ratio, available_at, source, ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:10], version_id) for row in staging_rows],
+        )
+
+    def _copy_staging_board_memberships(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT board_type, board_code, symbol, membership_mode, effective_from,
+                      effective_to, snapshot_date, available_at, source, ingested_at
+               FROM staging_board_memberships WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO board_memberships
+               (board_type, board_code, symbol, membership_mode, effective_from,
+                effective_to, snapshot_date, available_at, source, ingested_at,
+                dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:10], version_id) for row in staging_rows],
+        )
+
     def _clear_staging_for_run(self, run_id: str) -> None:
         self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
         self.connection.execute("DELETE FROM staging_securities WHERE run_id = ?", [run_id])
         self.connection.execute(
             "DELETE FROM staging_trade_calendar WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute("DELETE FROM staging_financials WHERE run_id = ?", [run_id])
+        self.connection.execute(
+            "DELETE FROM staging_adjustment_factors WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute(
+            "DELETE FROM staging_corporate_actions WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute(
+            "DELETE FROM staging_board_memberships WHERE run_id = ?", [run_id]
         )
 
     def mark_ingestion_failed(self, run_id: str, error_summary: str) -> None:
@@ -549,6 +913,56 @@ class MarketDataRepository:
 
     def count_effective_securities(self, as_of: date, available_before: datetime) -> int:
         return len(self.get_effective_securities(as_of, available_before))
+
+    def count_tradable_securities(self, as_of: date, available_before: datetime) -> int:
+        return sum(
+            1
+            for record in self.get_effective_securities(as_of, available_before)
+            if not self.is_suspended_on(record.symbol, as_of, available_before)
+        )
+
+    def get_symbol_industry_labels(
+        self,
+        symbols: list[str],
+        as_of: date,
+        available_before: datetime,
+    ) -> dict[str, str]:
+        if not symbols:
+            return {}
+        from tradingagents.market_data.contracts import Membership, MembershipMode
+
+        placeholders = ", ".join("?" for _ in symbols)
+        rows = self.connection.execute(
+            f"""SELECT m.symbol, d.name, m.membership_mode, m.effective_from,
+                       m.effective_to, m.snapshot_date, m.available_at, m.source,
+                       m.board_type, m.board_code
+                FROM board_memberships m
+                JOIN board_definitions d
+                  ON m.board_type = d.board_type AND m.board_code = d.board_code
+                LEFT JOIN dataset_versions v ON m.dataset_version_id = v.version_id
+                WHERE m.board_type = 'industry'
+                  AND m.symbol IN ({placeholders})
+                  AND m.available_at <= ?
+                  AND (m.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+                ORDER BY m.symbol, m.effective_from DESC""",
+            [*symbols, available_before],
+        ).fetchall()
+        labels: dict[str, str] = {}
+        for row in rows:
+            membership = Membership(
+                board_type=row[8],
+                board_code=row[9],
+                symbol=row[0],
+                membership_mode=MembershipMode(row[2]),
+                effective_from=row[3],
+                effective_to=row[4],
+                snapshot_date=row[5],
+                available_at=row[6],
+                source=row[7],
+            )
+            if membership.pit_member_on(as_of) and row[0] not in labels:
+                labels[row[0]] = row[1]
+        return labels
 
     def count_published_daily_symbols(self, trade_date: date) -> int:
         row = self.connection.execute(

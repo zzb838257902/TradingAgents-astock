@@ -19,6 +19,10 @@ from tradingagents.market_data.quality import (
 )
 from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
+from tradingagents.market_data.sync_policy import (
+    live_snapshot_date_error,
+    security_snapshot_write_error,
+)
 
 DAILY_COMPLETENESS_THRESHOLD = 0.995
 SECURITY_COVERAGE_THRESHOLD = 0.99
@@ -52,6 +56,9 @@ class MarketDataSync:
         self.provider = provider
         self.paths = paths
 
+    def _requires_live_snapshot_date(self) -> bool:
+        return getattr(self.provider, "name", "") == "free_astock"
+
     def probe_capabilities(self) -> SyncResult:
         result = self.provider.probe_capabilities()
         if not result.is_usable_for_screening and not result.allows_empty_universe:
@@ -71,6 +78,22 @@ class MarketDataSync:
         probe = self._require_probe_dataset("security_master")
         if probe is not None:
             return probe
+        run_time = datetime.now(tz=SHANGHAI)
+        if self._requires_live_snapshot_date():
+            date_error = live_snapshot_date_error(as_of, dataset="security_master")
+            if date_error:
+                return SyncResult(
+                    dataset="security_master",
+                    status=SyncStatus.BLOCKED,
+                    errors=[date_error],
+                )
+            snapshot_error = security_snapshot_write_error(as_of, run_time)
+            if snapshot_error:
+                return SyncResult(
+                    dataset="security_master",
+                    status=SyncStatus.BLOCKED,
+                    errors=[snapshot_error],
+                )
         fetched = self.provider.list_securities(as_of)
         if not fetched.is_usable_for_screening:
             return self._error_result("security_master", fetched)
@@ -81,13 +104,36 @@ class MarketDataSync:
         )
         self.repository.upsert_staging_securities(run_id, records)
         self._save_snapshot("stock_basic", {"as_of": as_of.isoformat()}, records)
+        count_target = getattr(self.provider, "count_listed_securities_target", None)
+        denominator = count_target(as_of) if count_target is not None else len(records)
         report = build_security_coverage_report(
             numerator=len(records),
-            denominator=len(records),
+            denominator=denominator,
             threshold=SECURITY_COVERAGE_THRESHOLD,
         )
+        if report.status != "pass":
+            self.repository.mark_ingestion_failed(
+                run_id,
+                f"security coverage {report.ratio:.4f} < {report.threshold}",
+            )
+            self.repository.record_quality_event(
+                dataset="security_master",
+                rule="security_coverage",
+                severity="blocking",
+                numerator=report.numerator,
+                denominator=report.denominator,
+                detail_json=report.to_dict(),
+            )
+            return SyncResult(
+                dataset="security_master",
+                status=SyncStatus.BLOCKED,
+                run_id=run_id,
+                errors=[f"security coverage below threshold: {report.ratio:.4f}"],
+                coverage_reports={"security_coverage": report},
+            )
         version_id = self.repository.publish_dataset_version(run_id)
         published = self.repository.get_latest_published_version("security_master")
+        self.repository.upsert_security_master_snapshot(as_of, records)
         return SyncResult(
             dataset="security_master",
             status=SyncStatus.PUBLISHED,
@@ -140,6 +186,14 @@ class MarketDataSync:
         if probe is not None:
             return probe
         run_time = datetime.now(tz=SHANGHAI)
+        if self._requires_live_snapshot_date():
+            date_error = live_snapshot_date_error(trade_date, dataset="daily_bars")
+            if date_error:
+                return SyncResult(
+                    dataset="daily_bars",
+                    status=SyncStatus.BLOCKED,
+                    errors=[date_error],
+                )
         fetched = self.provider.get_daily_by_trade_date(trade_date)
         if not fetched.is_usable_for_screening:
             return self._error_result("daily_bars", fetched)
@@ -165,7 +219,7 @@ class MarketDataSync:
         )
         self.repository.upsert_staging_daily_bars(run_id, bars)
         self._save_snapshot("daily", {"trade_date": trade_date.isoformat()}, bars)
-        expected = self.repository.count_effective_securities(
+        expected = self.repository.count_tradable_securities(
             trade_date,
             post_close_signal_time(trade_date),
         )
@@ -275,15 +329,28 @@ class MarketDataSync:
             }
             for item in memberships
         ]
-        self.repository.upsert_board_memberships(rows)
+        run_id = self.repository.begin_ingestion_run(
+            dataset,
+            {
+                "board_type": board_type,
+                "board_code": board_code,
+                "as_of": as_of.isoformat(),
+            },
+        )
+        self.repository.upsert_staging_board_memberships(run_id, rows)
         self._save_snapshot(
             dataset,
             {"board_type": board_type, "board_code": board_code, "as_of": as_of.isoformat()},
             [item.model_dump(mode="json") for item in memberships],
         )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version(dataset)
         return SyncResult(
             dataset=dataset,
             status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
             coverage_reports={
                 "membership_count": CoverageReport(
                     dataset=dataset,
@@ -316,15 +383,24 @@ class MarketDataSync:
             normalize_financial_row(row, open_dates=open_dates or None)
             for row in rows
         ]
-        self.repository.upsert_financials(normalized)
+        run_id = self.repository.begin_ingestion_run(
+            "financials",
+            {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
+        )
+        self.repository.upsert_staging_financials(run_id, normalized)
         self._save_snapshot(
             "fina_indicator",
             {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
             normalized,
         )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("financials")
         return SyncResult(
             dataset="financials",
             status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
             coverage_reports={
                 "financial_records": CoverageReport(
                     dataset="financials",
@@ -333,6 +409,69 @@ class MarketDataSync:
                     denominator=len(normalized) or 1,
                     threshold=0.0,
                     ratio=1.0 if normalized else 0.0,
+                ),
+            },
+        )
+
+    def sync_adjustment_factors(
+        self,
+        symbols: list[str] | None = None,
+        *,
+        as_of: date | None = None,
+    ) -> SyncResult:
+        fetch = getattr(self.provider, "fetch_adjustment_factor_rows", None)
+        if fetch is None:
+            return SyncResult(
+                dataset="adjustment_factors",
+                status=SyncStatus.ERROR,
+                errors=["provider does not support adjustment_factors"],
+            )
+        target_date = as_of or date.today()
+        target_symbols = symbols
+        if not target_symbols:
+            signal_time = post_close_signal_time(target_date)
+            target_symbols = self.repository.list_effective_symbols(
+                target_date,
+                signal_time,
+            )
+        if not target_symbols:
+            return SyncResult(
+                dataset="adjustment_factors",
+                status=SyncStatus.ERROR,
+                errors=["no symbols available for adjustment factor sync"],
+            )
+        fetched = fetch(target_symbols)
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result("adjustment_factors", fetched)
+        factor_rows, action_rows = fetched.data or ([], [])
+        run_id = self.repository.begin_ingestion_run(
+            "adjustment_factors",
+            {"as_of": target_date.isoformat(), "symbol_count": len(target_symbols)},
+        )
+        self.repository.upsert_staging_adjustment_factors(run_id, factor_rows)
+        if action_rows:
+            self.repository.upsert_staging_corporate_actions(run_id, action_rows)
+        self._save_snapshot(
+            "xdxr",
+            {"as_of": target_date.isoformat(), "symbol_count": len(target_symbols)},
+            {"factors": factor_rows, "actions": action_rows},
+        )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("adjustment_factors")
+        return SyncResult(
+            dataset="adjustment_factors",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={
+                "adjustment_factors": CoverageReport(
+                    dataset="adjustment_factors",
+                    status="pass",
+                    numerator=len(factor_rows),
+                    denominator=len(factor_rows) or 1,
+                    threshold=0.0,
+                    ratio=1.0 if factor_rows else 0.0,
                 ),
             },
         )

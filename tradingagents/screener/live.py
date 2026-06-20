@@ -41,18 +41,41 @@ def build_fixture_from_repository(
 
     securities = repo.get_effective_securities(signal_time.date(), signal_time)
     symbol_set = set(symbols)
+    industry_labels = repo.get_symbol_industry_labels(
+        symbols,
+        signal_time.date(),
+        signal_time,
+    )
+    financial_rows = repo.get_financials(symbols, available_before=signal_time)
+    financials = [
+        {
+            "symbol": row["symbol"],
+            "report_period": row["report_period"],
+            "roe": row["roe"],
+            "operating_cashflow": row["operating_cashflow"],
+            "net_profit": row["net_profit"],
+            "debt_ratio": row["debt_ratio"],
+            "announcement_date": row["announcement_date"].isoformat()
+            if hasattr(row["announcement_date"], "isoformat")
+            else row["announcement_date"],
+            "available_at": row["available_at"].isoformat()
+            if hasattr(row["available_at"], "isoformat")
+            else row["available_at"],
+        }
+        for row in financial_rows
+    ]
     return {
         "version": 1,
         "datasets": {"daily_bars": "pit_required", "financials": "pit_required"},
         "symbols": [
             {
                 "symbol": record.symbol,
-                "industry": "未知",
+                "industry": industry_labels.get(record.symbol, "未知"),
                 "list_date": record.list_date.isoformat(),
             }
             for record in securities
             if record.symbol in symbol_set
         ],
         "bars": bars,
-        "financials": [],
+        "financials": financials,
     }

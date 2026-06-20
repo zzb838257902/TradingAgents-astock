@@ -10,7 +10,7 @@ from typing import Optional
 import typer
 
 from tradingagents.market_data.config import MarketDataPaths
-from tradingagents.market_data.providers.tushare import TushareProvider
+from tradingagents.market_data.providers.factory import create_resolved_provider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
 
@@ -21,23 +21,25 @@ def _paths(home_dir: Path) -> MarketDataPaths:
     return MarketDataPaths(home_dir=home_dir.expanduser())
 
 
-def _sync(home_dir: Path) -> MarketDataSync:
+def _sync(home_dir: Path, provider: str | None = None) -> MarketDataSync:
     paths = _paths(home_dir)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-    provider = TushareProvider()
-    return MarketDataSync(repo, provider, paths)
+    resolved = create_resolved_provider(cli_provider=provider, home_dir=home_dir)
+    return MarketDataSync(repo, resolved, paths)
 
 
 @app.command("init")
 def init_market_data(
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
+    provider: Optional[str] = typer.Option(None, "--provider"),
 ) -> None:
     """Initialize live market database schema and run capability probe."""
     paths = _paths(home_dir)
     MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-    result = _sync(home_dir).probe_capabilities()
+    result = _sync(home_dir, provider).probe_capabilities()
     typer.echo(json.dumps({
         "live_db": str(paths.live_db_path),
+        "provider": provider or "resolved-default",
         "probe_status": result.status.value,
         "errors": result.errors,
     }, ensure_ascii=False))
@@ -46,9 +48,10 @@ def init_market_data(
 @app.command("probe")
 def probe_capabilities(
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
+    provider: Optional[str] = typer.Option(None, "--provider"),
 ) -> None:
     """Run provider capability probe and persist results."""
-    result = _sync(home_dir).probe_capabilities()
+    result = _sync(home_dir, provider).probe_capabilities()
     typer.echo(json.dumps({
         "status": result.status.value,
         "errors": result.errors,
@@ -64,9 +67,10 @@ def sync_dataset(
     board_type: Optional[str] = typer.Option(None, "--board-type"),
     board_code: Optional[str] = typer.Option(None, "--board-code"),
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
+    provider: Optional[str] = typer.Option(None, "--provider"),
 ) -> None:
     """Synchronize a dataset into the live repository."""
-    sync = _sync(home_dir)
+    sync = _sync(home_dir, provider)
     if dataset in {"security-master", "security_master"}:
         target = date.fromisoformat(as_of or date.today().isoformat())
         result = sync.sync_security_master(target)
@@ -84,6 +88,9 @@ def sync_dataset(
             )
         signal_time = datetime.fromisoformat(as_of)
         result = sync.sync_board_memberships(board_type, board_code, signal_time)
+    elif dataset in {"adjustment-factors", "adjustment_factors"}:
+        target = date.fromisoformat(as_of or date.today().isoformat())
+        result = sync.sync_adjustment_factors(as_of=target)
     elif dataset == "financials":
         if not as_of:
             raise typer.BadParameter("financials requires --as-of")

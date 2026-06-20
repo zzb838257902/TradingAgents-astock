@@ -1,39 +1,211 @@
-version: 1
+# TradingAgents-Astock data capability matrix
+# Baseline: auto-stock-screening-design (free default, paid optional)
+# Revised: 2026-06-19 — corrects phase-4 Tushare-as-default drift
+#
+# PIT levels:
+#   pit_required   — verified publication time + history; formal backtest allowed
+#   current_only   — live screening only; historical as_of → data_error
+#   best_effort    — exploratory reports only; NOT formal backtest acceptance
+#
+# Provider selection (no silent fallback):
+#   TRADINGAGENTS_MARKET_DATA_PROVIDER=free|tushare|fixture
+#   Priority: CLI --provider → env → YAML market_data.provider → default free
+
+version: 2
+default_provider: free
+
+providers:
+  free:
+    module: tradingagents.market_data.providers.free_astock
+    requires_token: false
+    description: mootdx + exchange/public HTTP (reuses dataflows/a_stock.py patterns)
+  tushare:
+    module: tradingagents.market_data.providers.tushare
+    optional_extra: screener-tushare
+    requires_token: true
+    env_token: TUSHARE_TOKEN
+    description: optional paid enhancement; explicit selection only
+  fixture:
+    module: tradingagents.market_data.providers.fixture
+    requires_token: false
+    description: offline tests, CI, explicit --fixture runs
+
 datasets:
-  daily_bars:
-    source: mootdx+sina
-    history_start: "provider-dependent"
-    update_frequency: daily
-    available_at: next_post_close_run
-    pit_level: pit_required
-  adjustment_factors:
-    source: provider-audit-required
-    history_start: "provider-dependent"
-    update_frequency: daily
-    available_at: next_post_close_run
-    pit_level: best_effort
-  security_master:
-    source: mootdx+exchange-metadata
-    history_start: "provider-dependent"
+  trade_calendar:
+    free_source: eastmoney+exchange-derived
+    paid_source: tushare.trade_cal
+    history_start: configurable_backfill
     update_frequency: daily
     available_at: source_publication_time
     pit_level: pit_required
-  financials:
-    source: sina+exchange-disclosure-time
-    history_start: "provider-dependent"
+    license: public_metadata
+    stability: high
+    degradation: derived-weekend-fallback-must-log-warning
+
+  security_master:
+    free_source: mootdx+eastmoney
+    paid_source: tushare.stock_basic
+    history_start: list_date_per_symbol
     update_frequency: daily
+    available_at: listing_event_or_daily_snapshot_time
+    pit_level: pit_required
+    license: public_metadata
+    stability: medium
+  # Historical delist boundary rules (mandatory):
+  # - Live screening: allowed with same-day effective pool
+  # - Exploratory history: best_effort only when snapshot coverage incomplete
+  # - Formal historical backtest: data_error if reliable historical security snapshot missing
+  # - FORBIDDEN: infer historical pool from current list; expose future delist before known
+    degradation:
+      live_screening: same_day_effective_pool
+      exploratory_report: best_effort_with_banner
+      formal_backtest: data_error_without_daily_snapshot_archive
+      accumulation: daily_snapshot_or_authoritative_history
+
+  daily_bars:
+    free_source: mootdx+sina-fallback
+    paid_source: tushare.daily
+    history_start: mootdx_offset_per_symbol
+    update_frequency: daily
+    available_at: conservative_post_close_or_ingestion_time
+    pit_level: pit_required
+    license: public_quotes
+    stability: medium
+    degradation: sina-fallback; sync_blocked_on_failure
+
+  adjustment_factors:
+    source: mootdx.xdxr
+    free_source: mootdx.xdxr
+    paid_source: tushare.adj_factor
+    history_start: provider-dependent
+    update_frequency: daily
+    available_at: factor_publication_time
+    pit_level: pit_required
+    license: public_or_vendor
+    stability: medium
+  # Formal V1 acceptance BLOCKED until reliable free adjustment factors OR
+  # verifiable corporate-actions-derived PIT adjusted series exists.
+  # Experimental mode only:
+    experimental:
+      price_basis: raw
+      pit_level: best_effort
+      banner: not_for_formal_performance_evaluation
+      excluded_from_phase_acceptance: true
+    degradation:
+      formal_momentum_backtest: blocked_until_pit_adjusted_series
+      execution_limits: always_unadjusted_real_prices
+
+  corporate_actions:
+    free_source: exchange-disclosure+sina-statements
+    paid_source: tushare.dividend+share_float
+    history_start: disclosure_date
+    update_frequency: event-driven
     available_at: disclosure_time
     pit_level: pit_required
-  concept_members:
-    source: tushare-dc_member
-    history_start: "2020-01-01 when permitted"
-    update_frequency: daily
-    available_at: trade_date_post_close
+    license: public_disclosure
+    stability: medium
+    degradation: required_for_adjusted_price_construction
+
+  financials:
+    free_source: mootdx+sina-statements
+    paid_source: tushare.fina_indicator
+    history_start: announcement_date
+    update_frequency: quarterly+daily_sync
+    available_at: announcement_or_next_open_conservative
     pit_level: pit_required
-    license_note: "Requires Tushare dc_member permission; CURRENT_ONLY fallbacks must not enter historical backtest"
+    license: public_disclosure
+    stability: medium
+  # PIT_REQUIRED only when announcement_date (or actual_announcement_time) is reliable.
+  # Records WITHOUT reliable announcement_date MUST NOT enter historical strategy.
+    admission_rule: announcement_date_required_for_pit_required
+    degradation:
+      missing_announcement_date: reject_record_or_best_effort_exploratory_only
+      formal_backtest: data_error_if_strategy_needs_missing_financials
+
+  industry_members:
+    free_source: eastmoney-current-snapshot
+    paid_source: tushare.index_member_all
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: any_source_passing_contract_and_pit_audit
+
+  concept_members:
+    free_source: eastmoney+baidu-current-snapshot
+    paid_source: tushare.dc_member
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: low-medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: dated_snapshot_or_effective_interval_after_audit
+
+  index_members:
+    free_source: eastmoney-current-snapshot
+    paid_source: tushare.index_weight
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: any_source_passing_contract_and_pit_audit
+
+  daily_indicators:
+    free_source: tencent+eastmoney
+    paid_source: tushare.daily_basic
+    history_start: limited_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: best_effort
+    license: public_quotes
+    stability: medium
+    degradation: not_required_for_phase4_core_acceptance
+
   fund_flow:
-    source: eastmoney
+    free_source: eastmoney-push2
     history_start: limited_recent_history
     update_frequency: intraday
     available_at: ingestion_time
     pit_level: best_effort
+    license: public_pages
+    stability: medium
+    degradation: agent_research_only
+
+acceptance_tiers:
+  free_default_path:
+    requires_token: false
+    must_pass:
+      - init_without_token
+      - probe_without_tushare
+      - sync_security_calendar_daily
+      - after_close_scheduler
+      - fixture_regression
+      - live_screening_all_and_custom
+      - current_only_board_live_screening
+    formal_backtest_requires:
+      - security_master_historical_snapshot_coverage_for_as_of
+      - pit_adjusted_price_series
+      - financials_with_announcement_date
+  paid_enhancement_path:
+    requires:
+      - pip_extra_screener_tushare
+      - TRADINGAGENTS_MARKET_DATA_PROVIDER=tushare
+      - TUSHARE_TOKEN
+    no_auto_fallback_to_free: true
+    optional_pass:
+      - pit_industry_concept_index_members
+      - extended_history_backfill

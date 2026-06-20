@@ -79,6 +79,10 @@ class FixtureProvider:
             pit_level=PITLevel.PIT_REQUIRED,
         )
 
+    def count_listed_securities_target(self, as_of: date) -> int:
+        result = self.list_securities(as_of)
+        return len(result.data or [])
+
     def get_trade_calendar(self, start: date, end: date) -> DataResult[list[TradingDay]]:
         run_time = datetime.now(tz=SHANGHAI)
         rows: list[TradingDay] = []

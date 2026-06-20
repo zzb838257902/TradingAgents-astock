@@ -10,10 +10,11 @@ from typing import Optional
 import typer
 
 from tradingagents.market_data.config import MarketDataPaths
-from tradingagents.market_data.providers.tushare import TushareProvider
+from tradingagents.market_data.fixture_store import load_fixture_into_repository
+from tradingagents.market_data.providers.factory import create_resolved_provider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
-from tradingagents.scheduler.jobs import config_hash, load_fixture_file, run_after_close
+from tradingagents.scheduler.jobs import config_hash, load_fixture_file, run_after_close, universe_hash
 from tradingagents.scheduler.state import JobKey, JobStateStore
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
@@ -27,6 +28,7 @@ def after_close(
     home_dir: Path = typer.Option(Path("~/.tradingagents").expanduser(), "--home-dir"),
     config_path: Optional[Path] = typer.Option(None, "--config"),
     fixture: Optional[Path] = typer.Option(None, "--fixture"),
+    provider: Optional[str] = typer.Option(None, "--provider"),
     universe: str = typer.Option("all", "--universe"),
     universe_code: Optional[str] = typer.Option(None, "--universe-code"),
     symbols: Optional[str] = typer.Option(None, "--symbols"),
@@ -40,7 +42,23 @@ def after_close(
         else ScreenerConfig(home_dir=home_dir)
     )
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-    sync = MarketDataSync(repo, TushareProvider(), paths)
+    fixture_data = load_fixture_file(fixture) if fixture else None
+    if fixture_data is not None:
+        load_fixture_into_repository(repo, fixture_data)
+    resolved_provider = (
+        "fixture"
+        if fixture_data is not None and provider is None
+        else provider
+    )
+    sync = MarketDataSync(
+        repo,
+        create_resolved_provider(
+            cli_provider=resolved_provider,
+            home_dir=home_dir,
+            fixture=fixture_data,
+        ),
+        paths,
+    )
     target = date.fromisoformat(trade_date)
     custom_symbols = tuple(item.strip() for item in (symbols or "").split(",") if item.strip())
     universe_request = UniverseRequest(
@@ -52,7 +70,6 @@ def after_close(
             fromlist=["post_close_signal_time"],
         ).post_close_signal_time(target),
     )
-    fixture_data = load_fixture_file(fixture) if fixture else None
     result = run_after_close(
         target,
         config,
@@ -91,7 +108,20 @@ def job_status(
     )
     store = JobStateStore(paths.home_dir / "scheduler")
     if trade_date:
-        key = JobKey(job_name, date.fromisoformat(trade_date), config_hash(config))
+        target = date.fromisoformat(trade_date)
+        universe_request = UniverseRequest(
+            universe_type=UniverseType("all"),
+            as_of=__import__(
+                "tradingagents.market_data.market_hours",
+                fromlist=["post_close_signal_time"],
+            ).post_close_signal_time(target),
+        )
+        key = JobKey(
+            job_name,
+            target,
+            config_hash(config),
+            universe_hash(universe_request),
+        )
         typer.echo(json.dumps({
             "run": store.load_run(key),
             "report": store.load_report(key),

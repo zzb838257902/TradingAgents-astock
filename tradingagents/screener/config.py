@@ -4,6 +4,8 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from tradingagents.market_data.contracts import PriceBasis
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -17,6 +19,7 @@ class UniverseConfig(StrictModel):
 class StrategyConfig(StrictModel):
     momentum_weight: float = Field(default=0.5, ge=0, le=1)
     quality_weight: float = Field(default=0.5, ge=0, le=1)
+    price_basis: PriceBasis = PriceBasis.FORWARD_ADJUSTED
 
     @model_validator(mode="after")
     def validate_weights(self) -> Self:

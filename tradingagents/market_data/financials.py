@@ -71,7 +71,7 @@ def normalize_financial_row(row: dict, *, open_dates: Iterable[date] | None = No
         "announcement_date": announcement_date,
         "actual_announcement_time": actual_time,
         "available_at": available_at,
-        "update_flag": row.get("update_flag"),
+        "update_flag": row.get("update_flag") or "",
         "source_version": row.get("source_version"),
         "record_type": row.get("record_type") or DEFAULT_RECORD_TYPE,
         "source": row["source"],

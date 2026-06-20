@@ -19,7 +19,7 @@ def test_apply_migrations_is_idempotent(tmp_path):
     second = apply_migrations(db_path)
     assert first == CURRENT_SCHEMA_VERSION
     assert second == CURRENT_SCHEMA_VERSION
-    assert CURRENT_SCHEMA_VERSION == 6
+    assert CURRENT_SCHEMA_VERSION == 9
 
 
 def test_fresh_repository_has_phase4_tables(tmp_path):
@@ -51,6 +51,11 @@ def test_fresh_repository_has_phase4_tables(tmp_path):
         "price_limits",
         "board_definitions",
         "board_memberships",
+        "security_master_snapshots",
+        "staging_financials",
+        "staging_adjustment_factors",
+        "staging_corporate_actions",
+        "staging_board_memberships",
     }
     assert expected.issubset(tables)
 

@@ -13,4 +13,4 @@ def test_every_dataset_declares_pit_capability():
             "pit_required", "current_only", "best_effort"
         }, name
         assert definition["history_start"], name
-        assert definition["source"], name
+        assert definition.get("source") or definition.get("free_source"), name

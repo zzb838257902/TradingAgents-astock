@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 9
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -323,6 +323,130 @@ def _migration_steps() -> list[tuple[int, str]]:
             FROM financials;
             DROP TABLE financials;
             ALTER TABLE financials_v6 RENAME TO financials;
+        """),
+        (7, """
+            CREATE TABLE financials_v7 (
+                symbol VARCHAR NOT NULL,
+                report_period VARCHAR NOT NULL,
+                roe DOUBLE NOT NULL,
+                operating_cashflow DOUBLE NOT NULL,
+                net_profit DOUBLE NOT NULL,
+                debt_ratio DOUBLE NOT NULL,
+                announcement_date DATE NOT NULL,
+                actual_announcement_time TIMESTAMPTZ,
+                available_at TIMESTAMPTZ NOT NULL,
+                update_flag VARCHAR NOT NULL DEFAULT '',
+                source_version VARCHAR,
+                record_type VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(
+                    symbol, report_period, announcement_date,
+                    source, record_type, update_flag
+                )
+            );
+            INSERT INTO financials_v7 (
+                symbol, report_period, roe, operating_cashflow, net_profit, debt_ratio,
+                announcement_date, actual_announcement_time, available_at, update_flag,
+                source_version, record_type, source, ingested_at, dataset_version_id
+            )
+            SELECT
+                symbol,
+                report_period,
+                roe,
+                operating_cashflow,
+                net_profit,
+                debt_ratio,
+                announcement_date,
+                actual_announcement_time,
+                available_at,
+                COALESCE(update_flag, ''),
+                source_version,
+                record_type,
+                source,
+                ingested_at,
+                dataset_version_id
+            FROM financials;
+            DROP TABLE financials;
+            ALTER TABLE financials_v7 RENAME TO financials;
+        """),
+        (8, """
+            CREATE TABLE IF NOT EXISTS security_master_snapshots (
+                snapshot_date DATE NOT NULL,
+                symbol VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                board VARCHAR NOT NULL,
+                list_date DATE NOT NULL,
+                delist_date DATE,
+                status VARCHAR NOT NULL,
+                st_flag BOOLEAN NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(snapshot_date, symbol, source)
+            );
+        """),
+        (9, """
+            CREATE TABLE IF NOT EXISTS staging_financials (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                report_period VARCHAR NOT NULL,
+                roe DOUBLE NOT NULL,
+                operating_cashflow DOUBLE NOT NULL,
+                net_profit DOUBLE NOT NULL,
+                debt_ratio DOUBLE NOT NULL,
+                announcement_date DATE NOT NULL,
+                actual_announcement_time TIMESTAMPTZ,
+                available_at TIMESTAMPTZ NOT NULL,
+                update_flag VARCHAR NOT NULL,
+                source_version VARCHAR,
+                record_type VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(
+                    run_id, symbol, report_period, announcement_date,
+                    source, record_type, update_flag
+                )
+            );
+            CREATE TABLE IF NOT EXISTS staging_adjustment_factors (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                factor DOUBLE NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, symbol, trade_date, source)
+            );
+            CREATE TABLE IF NOT EXISTS staging_corporate_actions (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                ex_date DATE NOT NULL,
+                action_type VARCHAR NOT NULL,
+                cash_div DOUBLE,
+                stock_div DOUBLE,
+                split_ratio DOUBLE,
+                rights_ratio DOUBLE,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, symbol, ex_date, action_type, source)
+            );
+            CREATE TABLE IF NOT EXISTS staging_board_memberships (
+                run_id VARCHAR NOT NULL,
+                board_type VARCHAR NOT NULL,
+                board_code VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                membership_mode VARCHAR NOT NULL,
+                effective_from DATE,
+                effective_to DATE,
+                snapshot_date DATE,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, board_type, board_code, symbol, effective_from, source)
+            );
         """),
     ]
 

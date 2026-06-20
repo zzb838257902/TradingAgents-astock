@@ -13,6 +13,11 @@ class PITLevel(StrEnum):
     BEST_EFFORT = "best_effort"
 
 
+class PriceBasis(StrEnum):
+    FORWARD_ADJUSTED = "forward_adjusted"
+    RAW = "raw"
+
+
 class DataStatus(StrEnum):
     OK = "ok"
     EMPTY = "empty"

@@ -37,7 +37,8 @@ def data_health() -> None:
     matrix_path = Path("docs/data/data-capability-matrix.yaml")
     matrix = yaml.safe_load(matrix_path.read_text(encoding="utf-8"))
     for name, definition in sorted(matrix["datasets"].items()):
-        typer.echo(f"{name}: {definition['pit_level']} ({definition['source']})")
+        source = definition.get("source") or definition.get("free_source", "unknown")
+        typer.echo(f"{name}: {definition['pit_level']} ({source})")
 
 
 @app.command("init-db")

@@ -81,6 +81,8 @@ def _seed_concept_snapshots(repo: MarketDataRepository) -> None:
             "source": "fixture",
         },
     ])
+    for snapshot_date in (day_one, day_two):
+        repo.seed_security_snapshot_for_date(snapshot_date, _signal_time(snapshot_date))
 
 
 def test_dated_snapshot_membership_is_trade_date_specific(tmp_path):
@@ -103,6 +105,20 @@ def test_dated_snapshot_membership_is_trade_date_specific(tmp_path):
 
 def test_current_only_concept_rejects_historical_backtest(tmp_path):
     repo = MarketDataRepository(tmp_path / "market.duckdb")
+    repo.upsert_security_records([
+        SecurityRecord(
+            symbol="600001",
+            name="A",
+            board="main",
+            valid_from=date(2020, 1, 1),
+            list_date=date(2020, 1, 1),
+            status="listed",
+            st_flag=False,
+            available_at=datetime(2020, 1, 1, 9, 0, tzinfo=SHANGHAI),
+            source="fixture",
+        ),
+    ])
+    repo.seed_security_snapshot_for_date(date(2025, 12, 18), _signal_time(date(2025, 12, 18)))
     repo.upsert_board_definitions([{
         "board_type": "concept",
         "board_code": "BK9999.DC",

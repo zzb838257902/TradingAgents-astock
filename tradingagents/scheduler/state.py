@@ -17,9 +17,14 @@ class JobKey:
     job_name: str
     trade_date: date
     config_hash: str
+    universe_hash: str = ""
 
     def storage_id(self) -> str:
-        return f"{self.job_name}_{self.trade_date.isoformat()}_{self.config_hash[:12]}"
+        universe_part = f"_{self.universe_hash[:12]}" if self.universe_hash else ""
+        return (
+            f"{self.job_name}_{self.trade_date.isoformat()}"
+            f"_{self.config_hash[:12]}{universe_part}"
+        )
 
 
 class JobStateStore:
@@ -56,6 +61,7 @@ class JobStateStore:
             "job_name": key.job_name,
             "trade_date": key.trade_date.isoformat(),
             "config_hash": key.config_hash,
+            "universe_hash": key.universe_hash,
             "attempts": [],
         }
         attempt_id = len(payload["attempts"]) + 1

@@ -100,6 +100,12 @@ def _seed_memberships(repo: MarketDataRepository) -> None:
             "source": "fixture",
         },
     ])
+    for snapshot_date in (
+        date(2025, 5, 1),
+        date(2025, 12, 18),
+        date(2026, 6, 1),
+    ):
+        repo.seed_security_snapshot_for_date(snapshot_date, _signal_time(snapshot_date))
 
 
 def test_validate_industry_requires_code():
@@ -158,6 +164,7 @@ def test_custom_universe_intersects_effective_securities(tmp_path):
         available_at=datetime(2020, 1, 1, 9, 0, tzinfo=SHANGHAI),
         source="fixture",
     )])
+    repo.seed_security_snapshot_for_date(date(2025, 12, 18), _signal_time(date(2025, 12, 18)))
     resolver = UniverseResolver(repo)
     result = resolver.resolve(UniverseRequest(
         universe_type=UniverseType.CUSTOM,

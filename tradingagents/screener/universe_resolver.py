@@ -97,9 +97,19 @@ class UniverseResolver:
 
         as_of_date = request.as_of.date()
         available_before = request.as_of
+        snapshot_error = self.repository.screening_security_snapshot_error(as_of_date)
+        if snapshot_error:
+            return UniverseResolveResult(
+                errors=[snapshot_error],
+                universe_type=request.universe_type,
+                universe_code=request.universe_code,
+            )
+
         effective_symbols = {
             record.symbol
-            for record in self.repository.get_effective_securities(as_of_date, available_before)
+            for record in self.repository.get_effective_securities_for_screening(
+                as_of_date, available_before
+            )
         }
 
         if request.universe_type == UniverseType.ALL:
@@ -121,7 +131,13 @@ class UniverseResolver:
         board_type = _BOARD_TYPE_BY_UNIVERSE[request.universe_type]
         board_code = request.universe_code or ""
         definition = self.repository.get_board_definition(board_type, board_code)
-        pit_level = PITLevel(definition["pit_level"]) if definition else PITLevel.PIT_REQUIRED
+        if definition is None:
+            return UniverseResolveResult(
+                errors=[f"{board_type} board {board_code} is not defined or not synced"],
+                universe_type=request.universe_type,
+                universe_code=board_code,
+            )
+        pit_level = PITLevel(definition["pit_level"])
         if pit_level == PITLevel.CURRENT_ONLY and as_of_date < date.today():
             return UniverseResolveResult(
                 errors=[f"{board_type} board {board_code} is current_only and cannot be used historically"],

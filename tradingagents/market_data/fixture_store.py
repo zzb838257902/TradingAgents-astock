@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from tradingagents.backtest.limits import compute_limit_prices
+from tradingagents.market_data.adjustments import baseline_factor_row
 from tradingagents.market_data.contracts import SecurityRecord
 from tradingagents.market_data.market_hours import SHANGHAI, bar_available_at, ensure_aware_shanghai
 from tradingagents.market_data.repository import MarketDataRepository
@@ -134,9 +135,53 @@ def _load_auxiliary_from_fixture(repo: MarketDataRepository, fixture: dict) -> N
     repo.upsert_price_limits(price_limit_rows)
 
 
+def _write_security_snapshots_for_fixture(
+    repo: MarketDataRepository,
+    fixture: dict,
+    securities: list[SecurityRecord],
+) -> None:
+    trading_dates = sorted(date.fromisoformat(key) for key in fixture["bars"])
+    for trade_date in trading_dates:
+        effective = [
+            record for record in securities
+            if record.was_effective_on(trade_date)
+        ]
+        repo.upsert_security_master_snapshot(trade_date, effective)
+
+
+def _load_adjustment_factors_from_fixture(repo: MarketDataRepository, fixture: dict) -> None:
+    trading_dates = sorted(date.fromisoformat(key) for key in fixture["bars"])
+    anchor_date = trading_dates[0]
+    anchor_available = bar_available_at(anchor_date)
+    rows = []
+    for item in fixture.get("symbols", []):
+        symbol = item["symbol"]
+        rows.append(baseline_factor_row(
+            symbol,
+            anchor_date,
+            available_at=anchor_available,
+            source="fixture",
+        ))
+    for item in fixture.get("adjustment_factors", []):
+        symbol = item["symbol"]
+        rows.append({
+            "symbol": symbol,
+            "trade_date": date.fromisoformat(item["trade_date"])
+            if isinstance(item["trade_date"], str) else item["trade_date"],
+            "factor": float(item["factor"]),
+            "available_at": _parse_available_at(item["available_at"]),
+            "source": item.get("source", "fixture"),
+        })
+    if rows:
+        repo.upsert_adjustment_factors(rows)
+
+
 def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> None:
-    repo.upsert_security_records(_build_security_records(fixture))
+    securities = _build_security_records(fixture)
+    repo.upsert_security_records(securities)
     repo.upsert_daily_bars(_build_daily_bars(fixture))
+    _write_security_snapshots_for_fixture(repo, fixture, securities)
+    _load_adjustment_factors_from_fixture(repo, fixture)
 
     financials = []
     for row in fixture.get("financials", []):
@@ -214,10 +259,12 @@ def load_fixture_as_published(repo: MarketDataRepository, fixture: dict) -> None
     sec_run = repo.begin_ingestion_run("security_master", {"fixture": True})
     repo.upsert_staging_securities(sec_run, securities)
     repo.publish_dataset_version(sec_run)
+    _write_security_snapshots_for_fixture(repo, fixture, securities)
 
     daily_run = repo.begin_ingestion_run("daily_bars", {"fixture": True})
     repo.upsert_staging_daily_bars(daily_run, _build_daily_bars(fixture))
     repo.publish_dataset_version(daily_run)
+    _load_adjustment_factors_from_fixture(repo, fixture)
 
     financials = []
     for row in fixture.get("financials", []):

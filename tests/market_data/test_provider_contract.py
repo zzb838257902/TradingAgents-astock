@@ -122,6 +122,7 @@ def test_provider_capability_records_probe_fields():
 def test_market_data_provider_protocol_surface():
     """All providers must expose the phase 4 provider surface."""
     from tradingagents.market_data.providers.fixture import FixtureProvider
+    from tradingagents.market_data.providers.free_astock import FreeAStockProvider
     from tradingagents.market_data.providers.tushare import TushareProvider
 
     required = {
@@ -135,7 +136,7 @@ def test_market_data_provider_protocol_surface():
         "get_index_members",
         "probe_capabilities",
     }
-    for provider_cls in (FixtureProvider, TushareProvider):
+    for provider_cls in (FixtureProvider, FreeAStockProvider, TushareProvider):
         for method in required:
             assert hasattr(provider_cls, method), method
         assert getattr(provider_cls, "name", None)

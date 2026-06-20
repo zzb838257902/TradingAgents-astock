@@ -146,6 +146,25 @@ def test_data_error_differs_from_empty_universe(tmp_path):
     assert report.errors
 
 
+def test_unknown_industry_board_returns_data_error(tmp_path):
+    fixture = _load_fixture()
+    trading_dates = sorted(fixture["bars"])
+    signal_date = date.fromisoformat(trading_dates[-2])
+    signal_time = datetime.combine(signal_date, datetime.min.time().replace(hour=15, minute=30), tzinfo=SHANGHAI)
+    report = run_screen(
+        fixture,
+        _relaxed_config(),
+        tmp_path / "unknown-industry.duckdb",
+        universe_request=UniverseRequest(
+            universe_type=UniverseType.INDUSTRY,
+            universe_code="INVALID.SI",
+            as_of=signal_time,
+        ),
+    )
+    assert report.status == ScreeningStatus.DATA_ERROR
+    assert report.errors
+
+
 def test_run_fixture_backtest_remains_backward_compatible(tmp_path):
     legacy = run_fixture_backtest(_load_fixture(), ScreenerConfig(), tmp_path / "legacy.duckdb")
     report = run_screen(_load_fixture(), ScreenerConfig(), tmp_path / "report.duckdb")

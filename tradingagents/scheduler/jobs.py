@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from tradingagents.market_data.config import MarketDataPaths
-from tradingagents.market_data.market_hours import post_close_signal_time
+from tradingagents.market_data.market_hours import SHANGHAI, post_close_signal_time
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync, SyncStatus
 from tradingagents.screener.config import ScreenerConfig
@@ -33,6 +33,18 @@ class AfterCloseResult:
 
 def config_hash(config: ScreenerConfig) -> str:
     return hashlib.sha256(config.model_dump_json().encode()).hexdigest()
+
+
+def universe_hash(request: UniverseRequest) -> str:
+    """Stable hash for universe selection only (excludes as_of)."""
+    payload = {
+        "universe_type": request.universe_type.value,
+        "universe_code": request.universe_code,
+        "symbols": list(request.symbols),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
 
 
 def is_trading_day(repo: MarketDataRepository, trade_date: date) -> bool:
@@ -59,7 +71,17 @@ def run_after_close(
     fixture: dict | None = None,
     force: bool = False,
 ) -> AfterCloseResult:
-    key = JobKey("after_close", trade_date, config_hash(config))
+    signal_time = max(post_close_signal_time(trade_date), datetime.now(tz=SHANGHAI))
+    request = universe_request or UniverseRequest(
+        universe_type=UniverseType.ALL,
+        as_of=signal_time,
+    )
+    key = JobKey(
+        "after_close",
+        trade_date,
+        config_hash(config),
+        universe_hash(request),
+    )
     store = JobStateStore(paths.home_dir / "scheduler")
     if not force and store.latest_success(key) is not None:
         cached = store.load_report(key)
@@ -72,13 +94,9 @@ def run_after_close(
 
     attempt_id = store.begin_attempt(key)
     repo = sync.repository
-    signal_time = post_close_signal_time(trade_date)
-    request = universe_request or UniverseRequest(
-        universe_type=UniverseType.ALL,
-        as_of=signal_time,
-    )
     sync_steps: dict[str, str] = {}
     errors: list[str] = []
+    use_fixture_slice = fixture is not None
 
     try:
         if not is_trading_day(repo, trade_date):
@@ -100,26 +118,32 @@ def run_after_close(
                 errors=report.errors,
             )
 
-        probe = sync.probe_capabilities()
-        sync_steps["capability_probe"] = probe.status.value
-        if probe.status != SyncStatus.PUBLISHED:
-            errors.extend(probe.errors or ["capability probe failed"])
-            raise RuntimeError("; ".join(errors))
+        if use_fixture_slice:
+            sync_steps["mode"] = "fixture"
+        else:
+            probe = sync.probe_capabilities()
+            sync_steps["capability_probe"] = probe.status.value
+            if probe.status != SyncStatus.PUBLISHED:
+                errors.extend(probe.errors or ["capability probe failed"])
+                raise RuntimeError("; ".join(errors))
 
-        security = sync.sync_security_master(trade_date)
-        sync_steps["security_master"] = security.status.value
-        if security.status != SyncStatus.PUBLISHED:
-            errors.extend(security.errors or ["security_master sync failed"])
-            raise RuntimeError("; ".join(errors))
+            security = sync.sync_security_master(trade_date)
+            sync_steps["security_master"] = security.status.value
+            if security.status != SyncStatus.PUBLISHED:
+                errors.extend(security.errors or ["security_master sync failed"])
+                raise RuntimeError("; ".join(errors))
 
-        daily = sync.sync_daily(trade_date)
-        sync_steps["daily_bars"] = daily.status.value
-        if daily.status != SyncStatus.PUBLISHED:
-            errors.extend(daily.errors or ["daily_bars sync failed"])
-            raise RuntimeError("; ".join(errors))
+            daily = sync.sync_daily(trade_date)
+            sync_steps["daily_bars"] = daily.status.value
+            if daily.status != SyncStatus.PUBLISHED:
+                errors.extend(daily.errors or ["daily_bars sync failed"])
+                raise RuntimeError("; ".join(errors))
 
-        financials = sync.sync_financials(signal_time)
-        sync_steps["financials"] = financials.status.value
+            financials = sync.sync_financials(signal_time)
+            sync_steps["financials"] = financials.status.value
+            if financials.status != SyncStatus.PUBLISHED:
+                errors.extend(financials.errors or ["financials sync failed"])
+                raise RuntimeError("; ".join(errors))
 
         if fixture is None:
             resolved = UniverseResolver(repo).resolve(

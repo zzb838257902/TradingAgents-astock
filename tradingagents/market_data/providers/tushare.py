@@ -61,31 +61,85 @@ def denormalize_ts_code(ts_code: str) -> str:
     return ts_code.split(".", 1)[0]
 
 
+def count_stock_basic_target(frame: pd.DataFrame, as_of: date) -> int:
+    """Count securities that should exist in master on ``as_of`` (raw API rows)."""
+    seen: set[str] = set()
+    total = 0
+    for row in frame.to_dict(orient="records"):
+        ts_code = str(row.get("ts_code", "")).strip()
+        if not ts_code or ts_code in seen:
+            continue
+        list_date = _parse_tushare_date(row.get("list_date"))
+        if list_date is None or list_date > as_of:
+            continue
+        delist_date = _parse_tushare_date(row.get("delist_date"))
+        if delist_date is not None and as_of >= delist_date:
+            continue
+        seen.add(ts_code)
+        total += 1
+    return total
+
+
+def industry_member_query_params(board_code: str) -> dict[str, str]:
+    """Build ``index_member_all`` params per Tushare SW industry contract."""
+    params: dict[str, str] = {"is_sw": "1"}
+    if board_code.endswith(".SI"):
+        params["l2_code"] = board_code.removesuffix(".SI")
+    else:
+        params["l3_code"] = board_code
+    return params
+
+
 def map_stock_basic_frame(frame: pd.DataFrame, source: str) -> list[SecurityRecord]:
     records: list[SecurityRecord] = []
     for row in frame.to_dict(orient="records"):
         list_date = _parse_tushare_date(row.get("list_date"))
         if list_date is None:
             continue
-        delist_date = _parse_tushare_date(row.get("delist_date"))
         symbol = denormalize_ts_code(str(row["ts_code"]))
         name = str(row.get("name", symbol))
-        st_flag = name.upper().startswith(("ST", "*ST"))
+        list_status = str(row.get("list_status", "L"))
+        delist_date = _parse_tushare_date(row.get("delist_date"))
         available_at = datetime.combine(list_date, time(9, 0), tzinfo=SHANGHAI)
+        if list_status == "D" and delist_date is not None:
+            valid_to = delist_date
+            available_at = max(
+                available_at,
+                datetime.combine(delist_date, time(15, 0), tzinfo=SHANGHAI),
+            )
+        else:
+            valid_to = None
+            delist_date = None
         records.append(SecurityRecord(
             symbol=symbol,
             name=name,
             board=str(row.get("market", "main")),
             valid_from=list_date,
-            valid_to=delist_date,
+            valid_to=valid_to,
             list_date=list_date,
             delist_date=delist_date,
-            status=str(row.get("list_status", "L")),
-            st_flag=st_flag,
+            status=list_status,
+            st_flag=False,
             available_at=available_at,
             source=source,
         ))
     return records
+
+
+def dedupe_securities_for_as_of(
+    records: list[SecurityRecord], as_of: date
+) -> list[SecurityRecord]:
+    priority = {"L": 0, "P": 1, "D": 2}
+    by_symbol: dict[str, SecurityRecord] = {}
+    for record in records:
+        if not record.was_effective_on(as_of):
+            continue
+        existing = by_symbol.get(record.symbol)
+        if existing is None or priority.get(record.status, 9) < priority.get(
+            existing.status, 9
+        ):
+            by_symbol[record.symbol] = record
+    return list(by_symbol.values())
 
 
 def map_trade_calendar_frame(frame: pd.DataFrame, source: str) -> list[TradingDay]:
@@ -171,11 +225,14 @@ def map_industry_members_frame(
         in_date = _parse_tushare_date(row.get("in_date"))
         if in_date is None:
             continue
+        ts_code = row.get("ts_code") or row.get("con_code")
+        if ts_code is None:
+            continue
         out_date = _parse_tushare_date(row.get("out_date"))
         rows.append(Membership(
             board_type="industry",
             board_code=board_code,
-            symbol=denormalize_ts_code(str(row["con_code"])),
+            symbol=denormalize_ts_code(str(ts_code)),
             membership_mode=MembershipMode.EFFECTIVE_INTERVAL,
             effective_from=in_date,
             effective_to=out_date,
@@ -314,16 +371,36 @@ class TushareProvider:
             errors=[],
         )
 
-    def list_securities(self, as_of: date) -> DataResult[list[SecurityRecord]]:
-        def call() -> list[SecurityRecord]:
+    def _fetch_stock_basic_frame(self) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        fields = "ts_code,name,list_date,delist_date,market,list_status"
+        for list_status in ("L", "D", "P"):
             frame = self._query(
                 "stock_basic",
                 exchange="",
-                list_status="L",
-                fields="ts_code,name,list_date,delist_date,market,list_status",
+                list_status=list_status,
+                fields=fields,
             )
+            if not frame.empty:
+                frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def count_listed_securities_target(self, as_of: date) -> int:
+        def call() -> int:
+            return count_stock_basic_target(self._fetch_stock_basic_frame(), as_of)
+
+        result = self._wrap_call(call)
+        if result.data is None:
+            return 0
+        return int(result.data)
+
+    def list_securities(self, as_of: date) -> DataResult[list[SecurityRecord]]:
+        def call() -> list[SecurityRecord]:
+            frame = self._fetch_stock_basic_frame()
             records = map_stock_basic_frame(frame, self.name)
-            return [record for record in records if record.was_effective_on(as_of)]
+            return dedupe_securities_for_as_of(records, as_of)
 
         result = self._wrap_call(call)
         if result.data is None:
@@ -447,7 +524,7 @@ class TushareProvider:
         as_of = ensure_aware_shanghai(as_of)
 
         def call() -> list[Membership]:
-            frame = self._query("index_member_all", index_code=code)
+            frame = self._query("index_member_all", **industry_member_query_params(code))
             return map_industry_members_frame(frame, code, self.name)
 
         result = self._wrap_call(call)
