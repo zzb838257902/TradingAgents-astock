@@ -1,0 +1,10 @@
+{
+  "source_id": "sina.corp.vCB_AllBulletin",
+  "symbol": "600000",
+  "board": "sse_main",
+  "scenario": "rate_limited",
+  "desensitized": true,
+  "full_text_saved": false,
+  "error_type": "RATE_LIMITED",
+  "must_not_map_to": "SUCCESS_EMPTY"
+}

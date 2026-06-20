@@ -209,3 +209,139 @@ acceptance_tiers:
     optional_pass:
       - pit_industry_concept_index_members
       - extended_history_backfill
+
+# Phase 5 event enrichment datasets (frozen by Task 1 probe on 2026-06-20)
+event_datasets:
+  official_announcements:
+    pit_level: pit_required
+    probe_status: PASS
+    markets: [sse_main, szse_main, chinext, star]
+    forbidden_substitutes:
+      - eastmoney.search.cmsArticleWebOld
+      - sina.corp.vCB_AllNewsStock
+      - tushare.anns
+    primary_source:
+      id: sina.corp.vCB_AllBulletin
+      platform: 新浪财经 VIP 公告列表
+      endpoint: https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletin.php
+      requires_token: false
+      auth: none
+      license: public_disclosure_metadata_only
+      pagination: Page query param (30 rows/page)
+      history_range: per_symbol paginated backfill
+      rate_limit: shared_http_conservative_1rps_no_em_throttle
+      time_precision: date_only_conservative_next_open
+      empty_semantics: SUCCESS_EMPTY only when HTML table has zero rows
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: 8f88cbc9857c92d4a3b2c1d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3
+      failover_condition: use backup_source when primary HTTP/PARSE fails
+    backup_source:
+      id: sina.CompanyFinanceService.getFinanceReport2022
+      platform: 新浪财经财报披露 report_list
+      endpoint: https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022
+      requires_token: false
+      license: public_disclosure
+      pagination: num param per statement type
+      history_range: recent periods per symbol
+      rate_limit: shared_http_conservative
+      time_precision: date_with_regulatory_deadline_fallback
+      empty_semantics: SUCCESS_EMPTY when report_list empty
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: edae3a9af333dc0e1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70
+      failover_condition: periodic_financial_disclosures_only_not_general_bulletins
+    optional_enhancement:
+      id: eastmoney.datacenter.disclosure
+      platform: 东方财富 datacenter
+      requires_token: false
+      blocks_core_on_failure: false
+      note: optional metadata enrichment only; never substitutes primary bulletin feed
+
+  event_news:
+    pit_level: best_effort
+    probe_status: PASS
+    primary_source:
+      id: eastmoney.search.cmsArticleWebOld
+      platform: 东方财富 search-api-web
+      endpoint: https://search-api-web.eastmoney.com/search/jsonp
+      requires_token: false
+      auth: none
+      license: headline_and_url_metadata_only_no_fulltext_redistribution
+      pagination: pageIndex/pageSize JSON param
+      history_range: recent articles per symbol keyword
+      rate_limit: eastmoney_em_get_throttled
+      time_precision: best_effort_article_timestamp
+      empty_semantics: SUCCESS_EMPTY when result list empty
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcd
+      failover_condition: sina.corp.vCB_AllNewsStock on primary failure
+    backup_source:
+      id: sina.corp.vCB_AllNewsStock
+      platform: 新浪财经个股新闻 HTML
+      endpoint: https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllNewsStock.php
+      requires_token: false
+      license: headline_and_url_metadata_only
+      pagination: Page param
+      history_range: recent headlines per symbol
+      rate_limit: shared_http_conservative
+      time_precision: best_effort_datetime_in_html
+      empty_semantics: SUCCESS_EMPTY when regex finds zero rows
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcde
+      failover_condition: none
+
+  event_fund_flow:
+    pit_level: best_effort
+    probe_status: PASS
+    primary_source:
+      id: eastmoney.push2.fund_flow
+      platform: 东财 push2 / push2his
+      endpoint: https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get
+      requires_token: false
+      auth: none
+      license: public_pages_research_only
+      pagination: secid + lmt days
+      history_range: ~20 trading days on free path
+      rate_limit: eastmoney_em_get_throttled
+      time_precision: ingestion_time_best_effort
+      empty_semantics: SUCCESS_EMPTY when kline nodes absent
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0
+      failover_condition: none_for_phase5_core
+
+  event_hot_topics:
+    pit_level: current_only
+    probe_status: PASS
+    primary_source:
+      id: ths.10jqka.getharden
+      platform: 同花顺涨停题材
+      endpoint: http://zx.10jqka.com.cn/event/api/getharden/date/{date}/...
+      requires_token: false
+      auth: none
+      license: public_pages_current_snapshot_only
+      pagination: single day feed
+      history_range: current_trading_day_only
+      rate_limit: shared_http_conservative
+      time_precision: trade_date_snapshot
+      empty_semantics: SUCCESS_EMPTY on non_trading_day_or_no_rows
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0123
+      failover_condition: none
+
+event_probe:
+  probed_at: "2026-06-20"
+  free_path_requires_token: false
+  core_announcement_gate: PASS
+  boards_probed:
+    sse_main: {symbol: "600000", bulletin_sha16: "8f88cbc9857c92d4", report_list_sha16: "edae3a9af333dc0e"}
+    szse_main: {symbol: "000001", bulletin_sha16: "4410cd78ade3fcb0", report_list_sha16: "169102868b28bda6"}
+    chinext: {symbol: "300001", bulletin_sha16: "f4dd635fae7edb38", report_list_sha16: "047caa45f9702dba"}
+    star: {symbol: "688001", bulletin_sha16: "0deee66cceb80a3a", report_list_sha16: "9887027e7369905c"}
+  scenarios_documented:
+    - with_announcements
+    - no_announcements
+    - revised_announcement
+    - pagination
+    - rate_limited
+    - network_error
+  blocked_if_core_fails: true
+  news_cannot_substitute_announcements: true

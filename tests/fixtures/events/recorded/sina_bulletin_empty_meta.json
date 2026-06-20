@@ -1,0 +1,12 @@
+{
+  "source_id": "sina.corp.vCB_AllBulletin",
+  "symbol": "000000",
+  "board": "synthetic",
+  "scenario": "no_announcements",
+  "desensitized": true,
+  "full_text_saved": false,
+  "response_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fields_present": [],
+  "empty_semantics": "SUCCESS_EMPTY",
+  "row_count": 0
+}

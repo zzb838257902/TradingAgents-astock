@@ -1,0 +1,10 @@
+{
+  "source_id": "sina.corp.vCB_AllBulletin",
+  "symbol": "600000",
+  "board": "sse_main",
+  "scenario": "network_error",
+  "desensitized": true,
+  "full_text_saved": false,
+  "error_type": "NETWORK_ERROR",
+  "must_not_map_to": "SUCCESS_EMPTY"
+}
