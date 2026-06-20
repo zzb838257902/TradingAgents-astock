@@ -765,6 +765,29 @@ def _sina_stock_code(code: str) -> str:
     return f"{_get_prefix(code)}{code}"
 
 
+def _sina_finance_report_list_to_dataframe(payload: dict) -> pd.DataFrame:
+    """Parse Sina getFinanceReport2022 report_list payload into a flat DataFrame."""
+    report_list = payload.get("report_list") or {}
+    rows: list[dict] = []
+    for period_key, entry in report_list.items():
+        row: dict = {
+            "报告日": str(period_key),
+            "公告日期": entry.get("publish_date"),
+        }
+        for item in entry.get("data") or []:
+            title = item.get("item_title")
+            field = item.get("item_field")
+            value = item.get("item_value")
+            if title:
+                row[str(title)] = value
+            if field:
+                row[str(field)] = value
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 def _get_financial_report_sina(
     code: str, report_type: str, freq: str, curr_date: str = None,
 ) -> pd.DataFrame:
@@ -792,16 +815,18 @@ def _get_financial_report_sina(
     r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
     d = r.json()
 
-    result = (d.get("result") or {}).get("data") or {}
-    items = result.get(source_type, [])
-    if not isinstance(items, list) or not items:
+    payload = (d.get("result") or {}).get("data") or {}
+    items = payload.get(source_type, [])
+    if isinstance(items, list) and items:
+        df = pd.DataFrame(items)
+    elif payload.get("report_list"):
+        df = _sina_finance_report_list_to_dataframe(payload)
+    else:
         return pd.DataFrame()
-
-    df = pd.DataFrame(items)
 
     # Filter by curr_date
     if curr_date and "报告日" in df.columns:
-        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
+        df["报告日"] = pd.to_datetime(df["报告日"].astype(str), errors="coerce")
         cutoff = pd.to_datetime(curr_date)
         df = df[df["报告日"] <= cutoff]
 

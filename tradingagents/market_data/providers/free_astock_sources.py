@@ -270,14 +270,24 @@ class LiveFreeAStockSourceBackend:
             rows.append({
                 "symbol": code,
                 "report_period": report_period,
-                "roe": _float_field(income_row, ("净资产收益率", "roe")),
+                "roe": _float_field(income_row, ("净资产收益率", "roe", "ROE")),
                 "operating_cashflow": _float_field(
                     cash_row,
-                    ("经营活动产生的现金流量净额", "经营活动现金流量净额"),
+                    (
+                        "经营活动产生的现金流量净额",
+                        "经营活动现金流量净额",
+                        "MANANETR",
+                    ),
                 ),
                 "net_profit": _float_field(
                     income_row,
-                    ("净利润", "归属于母公司所有者的净利润"),
+                    (
+                        "净利润",
+                        "归属于母公司所有者的净利润",
+                        "归属于母公司的净利润",
+                        "NETPROFIT",
+                        "NETPARECOMPPROF",
+                    ),
                 ),
                 "debt_ratio": _debt_ratio(balance_row),
                 "announcement_date": announcement_date,
@@ -338,8 +348,8 @@ def _float_field(row: pd.Series | None, keys: tuple[str, ...]) -> float:
 def _debt_ratio(balance_row: pd.Series | None) -> float:
     if balance_row is None:
         return 0.0
-    liabilities = _float_field(balance_row, ("负债合计",))
-    assets = _float_field(balance_row, ("资产总计", "资产合计"))
+    liabilities = _float_field(balance_row, ("负债合计", "TOTLIAB"))
+    assets = _float_field(balance_row, ("资产总计", "资产合计", "TOTASSET"))
     if assets <= 0:
         return 0.0
     return liabilities / assets

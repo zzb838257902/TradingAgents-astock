@@ -110,3 +110,41 @@ def test_sina_financial_report_handles_null_result():
     with patch.object(a_stock._requests, "get", return_value=_Resp()):
         frame = a_stock._get_financial_report_sina("600000", "利润表", "quarterly")
     assert frame.empty
+
+
+def test_sina_financial_report_parses_report_list_payload():
+    from tradingagents.dataflows import a_stock
+
+    payload = {
+        "result": {
+            "data": {
+                "report_list": {
+                    "20251231": {
+                        "publish_date": "20260331",
+                        "data": [
+                            {
+                                "item_field": "NETPROFIT",
+                                "item_title": "净利润",
+                                "item_value": "100.0",
+                            },
+                            {
+                                "item_field": "MANANETR",
+                                "item_title": "经营活动产生的现金流量净额",
+                                "item_value": "200.0",
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    class _Resp:
+        def json(self):
+            return payload
+
+    with patch.object(a_stock._requests, "get", return_value=_Resp()):
+        frame = a_stock._get_financial_report_sina("600000", "利润表", "quarterly")
+    assert not frame.empty
+    assert float(frame.iloc[0]["净利润"]) == 100.0
+    assert frame.iloc[0]["报告日"] == "20251231"
