@@ -38,6 +38,7 @@ EVENTS_FIXTURE = ROOT / "tests/fixtures/events/provider_events.json"
 RECORDED_DIR = ROOT / "tests/fixtures/events/recorded"
 SAMPLE_HTML = ROOT / "tests/fixtures/events/sina_bulletin_sample.html"
 DATELIST_HTML = ROOT / "tests/fixtures/events/sina_bulletin_datelist_sample.html"
+EMPTY_HTML = ROOT / "tests/fixtures/events/sina_bulletin_empty_sample.html"
 MATRIX_PATH = ROOT / "docs/data/data-capability-matrix.yaml"
 
 LIVE_SMOKE_SYMBOLS: dict[str, str] = {
@@ -530,6 +531,7 @@ def _recorded_contract_steps(report: AcceptanceReport) -> None:
     from tradingagents.market_data.providers.free_astock_sources import (
         count_sina_bulletin_detail_links,
         parse_sina_bulletin_html,
+        sina_bulletin_page_is_supplier_empty,
     )
 
     def catalog() -> dict[str, Any]:
@@ -594,16 +596,31 @@ def _recorded_contract_steps(report: AcceptanceReport) -> None:
                 validate_sina_bulletin_parse,
             )
 
-            validate_sina_bulletin_parse(mismatch_html, [])
+            validate_sina_bulletin_parse(mismatch_html, [], symbol="600000")
         except ProviderFetchError as exc:
             if exc.status != "parse_error":
                 raise AssertionError(f"expected parse_error, got {exc.status}") from exc
         else:
             raise AssertionError("parse mismatch must raise parse_error")
+        empty_html = EMPTY_HTML.read_text(encoding="utf-8")
+        if not sina_bulletin_page_is_supplier_empty(empty_html, "999998"):
+            raise AssertionError("recorded empty bulletin fixture must be supplier-empty")
+        validate_sina_bulletin_parse(empty_html, [], symbol="999998")
+        blocked_html = (
+            "<html><head><title>Access Denied</title></head><body>captcha</body></html>"
+        )
+        try:
+            validate_sina_bulletin_parse(blocked_html, [], symbol="600000")
+        except ProviderFetchError as exc:
+            if exc.status != "parse_error":
+                raise AssertionError(f"expected parse_error, got {exc.status}") from exc
+        else:
+            raise AssertionError("blocked page must raise parse_error")
         return {
             "table_rows": len(table_rows),
             "datelist_rows": len(datelist_rows),
             "detail_links": detail_links,
+            "empty_fixture_symbol": "999998",
         }
 
     report.run_step("recorded_parser_contract", parser_contract)

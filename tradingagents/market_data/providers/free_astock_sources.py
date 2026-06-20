@@ -356,7 +356,7 @@ class LiveFreeAStockSourceBackend:
         html = response.text
         try:
             rows = parse_sina_bulletin_html(html, code)
-            validate_sina_bulletin_parse(html, rows)
+            validate_sina_bulletin_parse(html, rows, symbol=code)
             return rows
         except ProviderFetchError:
             raise
@@ -548,22 +548,71 @@ _BULLETIN_DATELIST_ENTRY_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2})\s*(?:&nbsp;|\u00a0|\s)+<a[^>]+href=['\"][^'\"]+['\"]",
     re.IGNORECASE,
 )
+_SINA_BULLETIN_PAGE_RE = re.compile(
+    r"vCB_AllBulletin(?:\.php|/)|AllBulletin/stockid/",
+    re.IGNORECASE,
+)
+_BLOCKED_PAGE_MARKERS = (
+    "access denied",
+    "captcha",
+    "verify you are human",
+    "验证码",
+    "请完成验证",
+    "人机验证",
+    "waf_block",
+    "security check",
+)
+_SUPPLIER_EMPTY_MARKERS = (
+    "暂时没有数据",
+    "暂无数据",
+    "暂无公告",
+    "没有相关公告",
+    "没有找到相关信息",
+)
+_EMPTY_DATELIST_RE = re.compile(
+    r"""class=['"]datelist['"][^>]*>\s*<ul>\s*</ul>""",
+    re.IGNORECASE,
+)
 
 
 def count_sina_bulletin_detail_links(html: str) -> int:
     return len(_BULLETIN_DETAIL_LINK_RE.findall(html))
 
 
-def sina_bulletin_page_is_supplier_empty(html: str) -> bool:
-    if count_sina_bulletin_detail_links(html) > 0:
+def sina_bulletin_page_is_blocked_or_malformed(html: str) -> bool:
+    lowered = html.lower()
+    return any(marker in lowered for marker in _BLOCKED_PAGE_MARKERS)
+
+
+def sina_bulletin_page_is_target_page(html: str, symbol: str) -> bool:
+    code = _normalize_event_symbol(symbol)
+    if not _SINA_BULLETIN_PAGE_RE.search(html):
         return False
-    if _BULLETIN_DATELIST_CONTAINER_RE.search(html):
+    if f"stockid={code}" not in html and f"stockid/{code}" not in html:
+        return False
+    return "公司公告" in html
+
+
+def sina_bulletin_page_has_explicit_empty_marker(html: str) -> bool:
+    if any(marker in html for marker in _SUPPLIER_EMPTY_MARKERS):
+        return True
+    return _EMPTY_DATELIST_RE.search(html) is not None
+
+
+def sina_bulletin_page_is_supplier_empty(html: str, symbol: str) -> bool:
+    if count_sina_bulletin_detail_links(html) > 0:
         return False
     if _BULLETIN_DATELIST_ENTRY_RE.search(html):
         return False
     if _BULLETIN_ROW_RE.search(html):
         return False
-    return True
+    if not sina_bulletin_page_is_target_page(html, symbol):
+        return False
+    if sina_bulletin_page_is_blocked_or_malformed(html):
+        return False
+    if _BULLETIN_DATELIST_CONTAINER_RE.search(html):
+        return sina_bulletin_page_has_explicit_empty_marker(html)
+    return sina_bulletin_page_has_explicit_empty_marker(html)
 
 
 def _build_sina_bulletin_row(
@@ -605,16 +654,36 @@ def parse_sina_bulletin_html(html: str, symbol: str) -> list[dict[str, Any]]:
     return rows
 
 
-def validate_sina_bulletin_parse(html: str, rows: list[dict[str, Any]]) -> None:
+def validate_sina_bulletin_parse(
+    html: str,
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str,
+) -> None:
+    if rows:
+        if sina_bulletin_page_is_blocked_or_malformed(html):
+            raise ProviderFetchError(
+                "parse_error",
+                "bulletin response looks like captcha/access denied page",
+            )
+        return
+    if sina_bulletin_page_is_blocked_or_malformed(html):
+        raise ProviderFetchError(
+            "parse_error",
+            "bulletin response looks like captcha/access denied page",
+        )
+    if not sina_bulletin_page_is_target_page(html, symbol):
+        raise ProviderFetchError(
+            "parse_error",
+            f"response is not the company bulletin page for {symbol}",
+        )
     detail_links = count_sina_bulletin_detail_links(html)
-    if detail_links > 0 and not rows:
+    if detail_links > 0:
         raise ProviderFetchError(
             "parse_error",
             f"bulletin page contains {detail_links} detail links but parser returned 0 rows",
         )
-    if rows:
-        return
-    if sina_bulletin_page_is_supplier_empty(html):
+    if sina_bulletin_page_is_supplier_empty(html, symbol):
         return
     if _BULLETIN_DATELIST_ENTRY_RE.search(html) or _BULLETIN_ROW_RE.search(html):
         raise ProviderFetchError(
@@ -623,7 +692,7 @@ def validate_sina_bulletin_parse(html: str, rows: list[dict[str, Any]]) -> None:
         )
     raise ProviderFetchError(
         "parse_error",
-        "bulletin page is not a recognized supplier-empty response",
+        "bulletin page lacks explicit supplier-empty markers",
     )
 
 

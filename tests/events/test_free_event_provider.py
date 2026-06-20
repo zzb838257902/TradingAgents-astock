@@ -21,6 +21,10 @@ from tradingagents.market_data.providers.free_astock_sources import (
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SAMPLE_HTML = Path("tests/fixtures/events/sina_bulletin_sample.html").read_text(encoding="utf-8")
 DATELIST_HTML = Path("tests/fixtures/events/sina_bulletin_datelist_sample.html").read_text(encoding="utf-8")
+EMPTY_HTML = Path("tests/fixtures/events/sina_bulletin_empty_sample.html").read_text(encoding="utf-8")
+ACCESS_DENIED_HTML = Path(
+    "tests/fixtures/events/sina_bulletin_access_denied_sample.html",
+).read_text(encoding="utf-8")
 
 
 class _EventBackend:
@@ -73,14 +77,29 @@ def test_parse_sina_bulletin_datelist_html_extracts_rows():
 def test_validate_sina_bulletin_parse_errors_on_detail_links_without_rows():
     html = DATELIST_HTML + '<a href="/corp/view/vCB_AllBulletinDetail.php?id=1">x</a>'
     with pytest.raises(ProviderFetchError) as exc:
-        validate_sina_bulletin_parse(html, [])
+        validate_sina_bulletin_parse(html, [], symbol="600000")
     assert exc.value.status == "parse_error"
 
 
-def test_sina_bulletin_supplier_empty_page():
-    html = "<html><body><div>no announcements here</div></body></html>"
-    assert sina_bulletin_page_is_supplier_empty(html) is True
-    validate_sina_bulletin_parse(html, [])
+def test_sina_bulletin_supplier_empty_page_requires_explicit_marker():
+    assert sina_bulletin_page_is_supplier_empty(EMPTY_HTML, "999998") is True
+    validate_sina_bulletin_parse(EMPTY_HTML, [], symbol="999998")
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<html><body><div>no announcements here</div></body></html>",
+        ACCESS_DENIED_HTML,
+        "<html><head><title>Access Denied</title></head><body>captcha</body></html>",
+        "<html><body><form action='vCB_AllBulletin.php?stockid=600000'></form></body></html>",
+    ],
+)
+def test_malformed_or_blocked_pages_are_not_supplier_empty(html: str):
+    assert sina_bulletin_page_is_supplier_empty(html, "600000") is False
+    with pytest.raises(ProviderFetchError) as exc:
+        validate_sina_bulletin_parse(html, [], symbol="600000")
+    assert exc.value.status == "parse_error"
 
 
 def test_free_provider_fetch_announcements_offline():
