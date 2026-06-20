@@ -180,3 +180,27 @@ def test_ok_report_includes_industry_weights(tmp_path):
     if report.status == ScreeningStatus.OK:
         assert report.industry_weights
         assert abs(sum(report.target_weights.values()) + report.cash_weight - 1.0) < 0.05
+
+
+def test_run_report_exposes_event_enrichment_fields_when_enabled(tmp_path):
+    fixture = _load_fixture()
+    config = _relaxed_config().model_copy(update={
+        "event_enrichment": _relaxed_config().event_enrichment.model_copy(
+            update={"enabled": True, "candidate_limit": 3},
+        ),
+    })
+    report = run_screen(fixture, config, tmp_path / "event-fields.duckdb")
+    output = report.to_output_dict()
+    for key in (
+        "base_ranking",
+        "event_ranking",
+        "enhanced_ranking",
+        "event_contributions",
+        "risk_flags",
+        "event_dataset_versions",
+        "event_data_sources",
+        "event_degradations",
+        "event_pit_level",
+        "event_enrichment_errors",
+    ):
+        assert key in output

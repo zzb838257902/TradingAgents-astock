@@ -92,6 +92,11 @@ def screen(
     as_of: Optional[str] = typer.Option(None, "--as-of"),
     home_dir: Path = typer.Option(Path("~/.tradingagents").expanduser(), "--home-dir"),
     config_path: Optional[Path] = typer.Option(None, "--config"),
+    event_enrichment: Optional[bool] = typer.Option(
+        None,
+        "--event-enrichment/--no-event-enrichment",
+        help="override event_enrichment.enabled in config",
+    ),
 ) -> None:
     """Screen a fixture universe (all/industry/index/custom) and print JSON."""
     config = (
@@ -99,6 +104,12 @@ def screen(
         if config_path
         else ScreenerConfig(home_dir=home_dir)
     )
+    if event_enrichment is not None:
+        config = config.model_copy(update={
+            "event_enrichment": config.event_enrichment.model_copy(
+                update={"enabled": event_enrichment},
+            ),
+        })
     fixture_data = _load_fixture(fixture)
     trading_dates = sorted(fixture_data["bars"])
     signal_date = date.fromisoformat(trading_dates[-2])

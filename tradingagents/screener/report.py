@@ -45,6 +45,16 @@ class RunReport(BaseModel):
     positions: int = 0
     top_symbol: str | None = None
     errors: list[str] = Field(default_factory=list)
+    base_ranking: list[str] = Field(default_factory=list)
+    event_ranking: list[str] = Field(default_factory=list)
+    enhanced_ranking: list[str] = Field(default_factory=list)
+    event_contributions: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    risk_flags: dict[str, list[str]] = Field(default_factory=dict)
+    event_dataset_versions: dict[str, dict[str, Any] | None] = Field(default_factory=dict)
+    event_data_sources: dict[str, str] = Field(default_factory=dict)
+    event_degradations: dict[str, list[str]] = Field(default_factory=dict)
+    event_pit_level: str = ""
+    event_enrichment_errors: list[str] = Field(default_factory=list)
 
     def to_legacy_dict(self) -> dict[str, Any]:
         """Subset consumed by phase 0-3 tests and backtest-fixture CLI."""

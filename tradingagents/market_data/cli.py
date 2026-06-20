@@ -112,6 +112,39 @@ def sync_dataset(
         if not as_of:
             raise typer.BadParameter("financials requires --as-of")
         result = sync.sync_financials(datetime.fromisoformat(as_of), symbols=symbol_list)
+    elif dataset in {
+        "events",
+        "market_events",
+        "announcements",
+        "official_announcements",
+    }:
+        if not start or not end:
+            raise typer.BadParameter("events requires --start and --end")
+        if not symbol_list:
+            raise typer.BadParameter("events requires --symbols")
+        from tradingagents.events.service import EventSyncService
+
+        paths = _paths(home_dir)
+        repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+        provider = create_resolved_provider(cli_provider=provider, home_dir=home_dir)
+        service = EventSyncService(repo, provider, paths)
+        sync_result = service.sync_announcements(
+            symbol_list,
+            date.fromisoformat(start),
+            date.fromisoformat(end),
+            as_of=datetime.fromisoformat(as_of) if as_of else None,
+        )
+        typer.echo(json.dumps({
+            "dataset": sync_result.dataset,
+            "status": sync_result.status.value,
+            "run_id": sync_result.run_id,
+            "version_id": sync_result.version_id,
+            "errors": sync_result.errors,
+            "dedup_stats": (
+                None if sync_result.dedup_stats is None else sync_result.dedup_stats.__dict__
+            ),
+        }, ensure_ascii=False, default=str))
+        return
     else:
         raise typer.BadParameter(f"unsupported dataset: {dataset}")
     typer.echo(json.dumps({

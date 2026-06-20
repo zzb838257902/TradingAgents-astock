@@ -1173,6 +1173,22 @@ class MarketDataRepository:
         ]
         return [dict(zip(columns, row)) for row in rows]
 
+    def get_event_tags(self, event_ids: list[str]) -> list[dict[str, Any]]:
+        if not event_ids:
+            return []
+        placeholders = ", ".join("?" for _ in event_ids)
+        rows = self.connection.execute(
+            f"""SELECT t.event_id, t.tag_key, t.tag_value
+                FROM event_tags t
+                LEFT JOIN dataset_versions v ON t.dataset_version_id = v.version_id
+                WHERE t.event_id IN ({placeholders})
+                  AND (t.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+                ORDER BY t.event_id, t.tag_key""",
+            event_ids,
+        ).fetchall()
+        columns = ["event_id", "tag_key", "tag_value"]
+        return [dict(zip(columns, row)) for row in rows]
+
     def upsert_board_aliases(self, rows: Iterable[dict]) -> None:
         values = [
             (

@@ -22,6 +22,7 @@ from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.pit import require_pit_required
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
+from tradingagents.screener.event_enrichment import enrich_ranking_with_events
 from tradingagents.screener.factors import compute_momentum, compute_quality, rank_score
 from tradingagents.screener.models import CandidateInput
 from tradingagents.screener.portfolio import construct_portfolio
@@ -486,6 +487,21 @@ def run_screen(
     }
     industry_weights = compute_industry_weights(rounded_weights, industry_by_symbol)
 
+    base_scores = {
+        str(row.symbol): float(row.ensemble_score)
+        for row in scored.itertuples(index=False)
+    }
+    enrichment_kwargs: dict = {}
+    if config.event_enrichment.enabled:
+        enrichment = enrich_ranking_with_events(
+            repo,
+            config,
+            base_ranking=ranking,
+            base_scores=base_scores,
+            signal_time=signal_time,
+        )
+        enrichment_kwargs = enrichment.as_report_kwargs()
+
     return RunReport(
         run_id=run,
         status=ScreeningStatus.OK,
@@ -511,6 +527,7 @@ def run_screen(
         metrics=metrics,
         positions=len(portfolio.positions),
         top_symbol=ranking[0] if ranking else None,
+        **enrichment_kwargs,
     )
 
 
