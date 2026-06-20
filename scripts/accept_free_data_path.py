@@ -330,7 +330,7 @@ def main() -> int:
                 [
                     sys.executable, "-m", "tradingagents.market_data.cli", "sync",
                     "--dataset", "trade-calendar",
-                    "--start", f"{screening_date[:7]}-01",
+                    "--start", "1990-01-01",
                     "--end", screening_date,
                     "--home-dir", str(live_home),
                     "--provider", "free",

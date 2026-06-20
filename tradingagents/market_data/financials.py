@@ -135,7 +135,7 @@ def derive_roe(
     equity: float,
     report_period: str | None,
 ) -> float:
-    """Fill ROE from income indicators or net_profit / equity."""
+    """Fill ROE from income indicators or net_profit / equity (derived; not weighted avg)."""
     normalized = normalize_reported_roe(direct_roe)
     if normalized != 0.0:
         return normalized

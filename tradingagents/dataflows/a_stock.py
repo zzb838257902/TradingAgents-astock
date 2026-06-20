@@ -14,8 +14,8 @@ Data sources:
 
 from __future__ import annotations
 
-from typing import Annotated
-from datetime import datetime
+from typing import Annotated, Any
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 import json as _json
 import os
@@ -849,7 +849,10 @@ def _sina_finance_report_list_to_dataframe(payload: dict) -> pd.DataFrame:
     for period_key, entry in report_list.items():
         row: dict = {
             "报告日": str(period_key),
-            "公告日期": entry.get("publish_date"),
+            "公告日期": _resolve_sina_announcement_date(
+                str(period_key),
+                entry.get("publish_date"),
+            ),
         }
         for item in entry.get("data") or []:
             title = item.get("item_title")
@@ -863,6 +866,60 @@ def _sina_finance_report_list_to_dataframe(payload: dict) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def _report_period_end_date(period_key: str) -> date | None:
+    text = str(period_key).strip()
+    if len(text) >= 8 and text[:8].isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return None
+
+
+def _parse_sina_publish_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "-" in text:
+        return date.fromisoformat(text[:10])
+    if len(text) >= 8 and text[:8].isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return None
+
+
+def _regulatory_announcement_deadline(period_end: date) -> date:
+    """A-share latest disclosure deadlines (used when Sina publish_date is implausible)."""
+    if period_end.month == 3:
+        return date(period_end.year, 4, 30)
+    if period_end.month == 6:
+        return date(period_end.year, 8, 31)
+    if period_end.month == 9:
+        return date(period_end.year, 10, 31)
+    if period_end.month == 12:
+        return date(period_end.year + 1, 4, 30)
+    return period_end
+
+
+def _max_announcement_lag_days(period_end: date) -> int:
+    if period_end.month == 12:
+        return 120
+    if period_end.month == 6:
+        return 65
+    return 40
+
+
+def _resolve_sina_announcement_date(period_key: str, publish_date_raw: Any) -> str | None:
+    """Reject Sina comparison-column publish_date; fall back to regulatory deadline."""
+    period_end = _report_period_end_date(period_key)
+    if period_end is None:
+        return None
+    publish = _parse_sina_publish_date(publish_date_raw)
+    if publish is not None and publish > period_end:
+        lag_days = (publish - period_end).days
+        if lag_days <= _max_announcement_lag_days(period_end):
+            return publish.isoformat()
+    return _regulatory_announcement_deadline(period_end).isoformat()
 
 
 def _get_financial_report_sina(

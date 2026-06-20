@@ -14,7 +14,6 @@ from tradingagents.market_data.contracts import (
 from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
     build_backfill_completeness_report,
-    build_financial_field_quality_report,
     build_financial_symbol_coverage_report,
 )
 from tradingagents.market_data.repository import MarketDataRepository

@@ -244,7 +244,12 @@ class LiveFreeAStockSourceBackend:
         announced_before: datetime,
         open_dates: list[date] | None = None,
     ) -> list[dict[str, Any]]:
-        from tradingagents.market_data.financials import financial_available_at
+        from tradingagents.market_data.financials import (
+            DEFAULT_RECORD_TYPE,
+            derive_roe,
+            financial_available_at,
+            normalize_reported_roe,
+        )
         from tradingagents.dataflows.a_stock import (
             _get_financial_report_sina,
             _normalize_ticker,
@@ -274,11 +279,12 @@ class LiveFreeAStockSourceBackend:
             cash_row = _match_report_row(cashflow, report_period)
             balance_row = _match_report_row(balance, report_period)
             net_profit = _float_field(income_row, _NET_PROFIT_KEYS)
+            direct_roe = _float_field(income_row, _ROE_DIRECT_KEYS)
             rows.append({
                 "symbol": code,
                 "report_period": report_period,
                 "roe": derive_roe(
-                    direct_roe=_float_field(income_row, _ROE_DIRECT_KEYS),
+                    direct_roe=direct_roe,
                     net_profit=net_profit,
                     equity=_float_field(balance_row, _EQUITY_KEYS),
                     report_period=report_period,
@@ -296,7 +302,11 @@ class LiveFreeAStockSourceBackend:
                 "announcement_date": announcement_date,
                 "available_at": available_at,
                 "source": "free_astock",
-                "record_type": "indicator",
+                "record_type": (
+                    DEFAULT_RECORD_TYPE
+                    if normalize_reported_roe(direct_roe) != 0.0
+                    else "derived_indicator"
+                ),
             })
         return rows
 

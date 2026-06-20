@@ -50,18 +50,11 @@ def _listing_trade_dates_for_screening(
     signal_date: date,
     min_listing_days: int,
 ) -> list[date] | None:
+    """Read-only: screening must not fetch calendars over the network."""
     stored = sorted(day for day in repo.list_open_trade_dates() if day <= signal_date)
     if len(stored) > min_listing_days:
         return stored
-    try:
-        from tradingagents.market_data.providers.free_astock_sources import LiveFreeAStockSourceBackend
-
-        return LiveFreeAStockSourceBackend().fetch_sse_trade_dates(
-            date(1990, 1, 1),
-            signal_date,
-        )
-    except Exception:
-        return stored or None
+    return None
 
 
 def _portfolio_target_weights(portfolio, portfolio_value: float) -> dict[str, float]:
@@ -275,17 +268,35 @@ def run_screen(
             avg_amount_20d=_avg_amount_20d(history, signal_date),
         ))
 
+    listing_trade_dates = _listing_trade_dates_for_screening(
+        repo,
+        signal_date,
+        config.universe.min_listing_days,
+    )
+    if listing_trade_dates is None:
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            universe_size=universe_size,
+            pit_level=pit_level,
+            dataset_versions=dataset_versions,
+            data_sources=data_sources,
+            status=ScreeningStatus.DATA_ERROR,
+            errors=[
+                "trade_calendar in repository is shorter than min_listing_days; "
+                "sync trade-calendar from 1990-01-01 before screening"
+            ],
+            data_quality=data_quality,
+        )
+
     universe = filter_universe(
         candidates,
         as_of=signal_date,
         min_listing_days=config.universe.min_listing_days,
         min_avg_amount_20d=config.universe.min_avg_amount_20d,
         trading_dates=trading_dates,
-        listing_trade_dates=_listing_trade_dates_for_screening(
-            repo,
-            signal_date,
-            config.universe.min_listing_days,
-        ),
+        listing_trade_dates=listing_trade_dates,
     )
     if not universe.included:
         return _base_report(

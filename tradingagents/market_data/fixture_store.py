@@ -176,9 +176,37 @@ def _load_adjustment_factors_from_fixture(repo: MarketDataRepository, fixture: d
         repo.upsert_adjustment_factors(rows)
 
 
+def _seed_fixture_trade_calendar(repo: MarketDataRepository, fixture: dict) -> None:
+    trading_dates = sorted(date.fromisoformat(key) for key in fixture["bars"])
+    if not trading_dates:
+        return
+    end = trading_dates[-1]
+    earliest_list = min(
+        date.fromisoformat(item["list_date"]) if item.get("list_date") else trading_dates[0]
+        for item in fixture["symbols"]
+    )
+    start = min(earliest_list, trading_dates[0]) - timedelta(days=400)
+    rows = []
+    cursor = start
+    while cursor <= end:
+        if cursor.weekday() < 5:
+            rows.append({
+                "exchange": "SSE",
+                "trade_date": cursor,
+                "is_open": True,
+                "available_at": datetime.combine(cursor, time(9, 0), tzinfo=SHANGHAI),
+                "source": "fixture",
+            })
+        cursor += timedelta(days=1)
+    run_id = repo.begin_ingestion_run("trade_calendar", {"fixture": True})
+    repo.upsert_staging_trade_calendar(run_id, rows)
+    repo.publish_dataset_version(run_id)
+
+
 def load_fixture_into_repository(repo: MarketDataRepository, fixture: dict) -> None:
     securities = _build_security_records(fixture)
     repo.upsert_security_records(securities)
+    _seed_fixture_trade_calendar(repo, fixture)
     repo.upsert_daily_bars(_build_daily_bars(fixture))
     _write_security_snapshots_for_fixture(repo, fixture, securities)
     _load_adjustment_factors_from_fixture(repo, fixture)
@@ -260,6 +288,7 @@ def load_fixture_as_published(repo: MarketDataRepository, fixture: dict) -> None
     repo.upsert_staging_securities(sec_run, securities)
     repo.publish_dataset_version(sec_run)
     _write_security_snapshots_for_fixture(repo, fixture, securities)
+    _seed_fixture_trade_calendar(repo, fixture)
 
     daily_run = repo.begin_ingestion_run("daily_bars", {"fixture": True})
     repo.upsert_staging_daily_bars(daily_run, _build_daily_bars(fixture))

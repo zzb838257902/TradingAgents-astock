@@ -244,24 +244,23 @@ class FreeAStockProvider:
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime
     ) -> DataResult[list[dict]]:
+        import os
+        import time
+
         run_time = datetime.now(tz=SHANGHAI)
         announced_before = ensure_aware_shanghai(announced_before)
-        try:
-            open_dates = self._backend.fetch_sse_trade_dates(
-                date(1990, 1, 1),
-                run_time.date(),
-            )
-        except Exception:
-            open_dates = None
+        interval = float(os.environ.get("FINANCIAL_SYNC_INTERVAL", "0.15"))
         rows: list[dict] = []
         errors: list[str] = []
-        for symbol in symbols:
+        for index, symbol in enumerate(symbols):
+            if index > 0 and interval > 0:
+                time.sleep(interval)
             try:
                 rows.extend(
                     self._backend.fetch_sina_financial_rows(
                         symbol,
                         announced_before,
-                        open_dates=open_dates,
+                        open_dates=None,
                     )
                 )
             except Exception as exc:

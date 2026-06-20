@@ -148,3 +148,46 @@ def test_sina_financial_report_parses_report_list_payload():
     assert not frame.empty
     assert float(frame.iloc[0]["净利润"]) == 100.0
     assert frame.iloc[0]["报告日"] == "20251231"
+
+
+def test_sina_financial_report_rejects_stale_comparison_publish_date():
+    from tradingagents.dataflows import a_stock
+
+    payload = {
+        "result": {
+            "data": {
+                "report_list": {
+                    "20240630": {
+                        "publish_date": "20250828",
+                        "data": [
+                            {
+                                "item_field": "NETPROFIT",
+                                "item_title": "净利润",
+                                "item_value": "100.0",
+                            },
+                        ],
+                    },
+                    "20250630": {
+                        "publish_date": "20250828",
+                        "data": [
+                            {
+                                "item_field": "NETPROFIT",
+                                "item_title": "净利润",
+                                "item_value": "200.0",
+                            },
+                        ],
+                    },
+                }
+            }
+        }
+    }
+
+    class _Resp:
+        def json(self):
+            return payload
+
+    with patch.object(a_stock._requests, "get", return_value=_Resp()):
+        frame = a_stock._get_financial_report_sina("600000", "利润表", "quarterly")
+    by_period = {str(row["报告日"]): row["公告日期"] for _, row in frame.iterrows()}
+    assert by_period["20240630"] == "2024-08-31"
+    assert by_period["20250630"] == "2025-08-28"
