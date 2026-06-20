@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -446,6 +446,96 @@ def _migration_steps() -> list[tuple[int, str]]:
                 source VARCHAR NOT NULL,
                 ingested_at TIMESTAMPTZ,
                 PRIMARY KEY(run_id, board_type, board_code, symbol, effective_from, source)
+            );
+        """),
+        (10, """
+            CREATE TABLE IF NOT EXISTS market_events (
+                event_id VARCHAR NOT NULL PRIMARY KEY,
+                event_type VARCHAR NOT NULL,
+                title VARCHAR NOT NULL,
+                summary VARCHAR NOT NULL DEFAULT '',
+                published_at TIMESTAMPTZ NOT NULL,
+                available_at TIMESTAMPTZ,
+                source VARCHAR NOT NULL,
+                source_url VARCHAR NOT NULL DEFAULT '',
+                source_record_id VARCHAR NOT NULL,
+                source_version VARCHAR NOT NULL DEFAULT '',
+                content_hash VARCHAR NOT NULL,
+                pit_level VARCHAR NOT NULL,
+                sentiment VARCHAR NOT NULL DEFAULT 'unknown',
+                severity VARCHAR NOT NULL DEFAULT 'medium',
+                announcement_date_source VARCHAR,
+                raw_snapshot_id VARCHAR,
+                dataset_version_id VARCHAR,
+                ingestion_run_id VARCHAR,
+                quality_status VARCHAR NOT NULL DEFAULT 'valid',
+                supersedes_event_id VARCHAR,
+                ingested_at TIMESTAMPTZ
+            );
+            CREATE TABLE IF NOT EXISTS staging_market_events (
+                run_id VARCHAR NOT NULL,
+                event_id VARCHAR NOT NULL,
+                event_type VARCHAR NOT NULL,
+                title VARCHAR NOT NULL,
+                summary VARCHAR NOT NULL DEFAULT '',
+                published_at TIMESTAMPTZ NOT NULL,
+                available_at TIMESTAMPTZ,
+                source VARCHAR NOT NULL,
+                source_url VARCHAR NOT NULL DEFAULT '',
+                source_record_id VARCHAR NOT NULL,
+                source_version VARCHAR NOT NULL DEFAULT '',
+                content_hash VARCHAR NOT NULL,
+                pit_level VARCHAR NOT NULL,
+                sentiment VARCHAR NOT NULL DEFAULT 'unknown',
+                severity VARCHAR NOT NULL DEFAULT 'medium',
+                announcement_date_source VARCHAR,
+                raw_snapshot_id VARCHAR,
+                ingestion_run_id VARCHAR,
+                quality_status VARCHAR NOT NULL DEFAULT 'valid',
+                supersedes_event_id VARCHAR,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, event_id),
+                UNIQUE(run_id, source, source_record_id, source_version)
+            );
+            CREATE TABLE IF NOT EXISTS event_symbol_links (
+                event_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                role VARCHAR NOT NULL DEFAULT 'primary',
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(event_id, symbol, role, source)
+            );
+            CREATE TABLE IF NOT EXISTS staging_event_symbol_links (
+                run_id VARCHAR NOT NULL,
+                event_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                role VARCHAR NOT NULL DEFAULT 'primary',
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                PRIMARY KEY(run_id, event_id, symbol, role, source)
+            );
+            CREATE TABLE IF NOT EXISTS event_tags (
+                event_id VARCHAR NOT NULL,
+                tag_key VARCHAR NOT NULL,
+                tag_value VARCHAR NOT NULL,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(event_id, tag_key)
+            );
+            CREATE TABLE IF NOT EXISTS staging_event_tags (
+                run_id VARCHAR NOT NULL,
+                event_id VARCHAR NOT NULL,
+                tag_key VARCHAR NOT NULL,
+                tag_value VARCHAR NOT NULL,
+                PRIMARY KEY(run_id, event_id, tag_key)
+            );
+            CREATE TABLE IF NOT EXISTS board_aliases (
+                board_type VARCHAR NOT NULL,
+                board_code VARCHAR NOT NULL,
+                alias VARCHAR NOT NULL,
+                alias_normalized VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                PRIMARY KEY(board_type, alias_normalized, source)
             );
         """),
     ]

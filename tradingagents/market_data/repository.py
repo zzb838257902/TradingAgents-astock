@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
-from tradingagents.market_data.contracts import SecurityRecord
+from tradingagents.events.contracts import EventSymbolLink, MarketEvent, stable_event_id
+from tradingagents.market_data.contracts import PITLevel, SecurityRecord
 from tradingagents.market_data.financials import normalize_financial_row, pick_latest_visible_financials
 from tradingagents.market_data.migrations import apply_migrations
 
@@ -29,6 +30,13 @@ _FINANCIAL_COLUMNS = (
     "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
     "debt_ratio", "announcement_date", "actual_announcement_time", "available_at",
     "update_flag", "source_version", "record_type", "source",
+)
+_MARKET_EVENT_COLUMNS = (
+    "event_id", "event_type", "title", "summary", "published_at", "available_at",
+    "source", "source_url", "source_record_id", "source_version", "content_hash",
+    "pit_level", "sentiment", "severity", "announcement_date_source",
+    "raw_snapshot_id", "ingestion_run_id", "quality_status", "supersedes_event_id",
+    "ingested_at",
 )
 
 
@@ -872,6 +880,329 @@ class MarketDataRepository:
         self.connection.execute(
             "DELETE FROM staging_board_memberships WHERE run_id = ?", [run_id]
         )
+        self.connection.execute(
+            "DELETE FROM staging_market_events WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute(
+            "DELETE FROM staging_event_symbol_links WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute(
+            "DELETE FROM staging_event_tags WHERE run_id = ?", [run_id]
+        )
+
+    def _market_event_row(self, event: MarketEvent, *, run_id: str | None = None) -> tuple:
+        ingested = event.ingested_at or datetime.now(tz=SHANGHAI)
+        return (
+            *((run_id,) if run_id is not None else ()),
+            event.event_id,
+            event.event_type.value,
+            event.title,
+            event.summary,
+            event.published_at,
+            event.available_at,
+            event.source,
+            event.source_url,
+            event.source_record_id,
+            event.source_version,
+            event.content_hash,
+            event.pit_level.value,
+            event.sentiment.value,
+            event.severity.value,
+            event.announcement_date_source.value if event.announcement_date_source else None,
+            event.raw_snapshot_id,
+            event.ingestion_run_id or run_id,
+            event.quality_status.value,
+            event.supersedes_event_id,
+            ingested,
+        )
+
+    def _staging_event_stable_keys(self, run_id: str) -> set[str]:
+        rows = self.connection.execute(
+            """SELECT source, source_record_id, source_version
+               FROM staging_market_events WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        return {
+            f"{row[0]}:{row[1]}:{row[2] or 'v0'}"
+            for row in rows
+        }
+
+    def upsert_staging_event_bundle(
+        self,
+        run_id: str,
+        *,
+        events: list[MarketEvent],
+        links: list[EventSymbolLink],
+        tags: list[dict[str, str]],
+    ) -> None:
+        run = self.connection.execute(
+            "SELECT dataset FROM ingestion_runs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        if run is None:
+            raise ValueError(f"unknown ingestion run {run_id}")
+        if run[0] != "market_events":
+            raise ValueError(f"run {run_id} is not a market_events ingestion run")
+
+        existing_keys = self._staging_event_stable_keys(run_id)
+        batch_keys: set[str] = set()
+        event_ids = {event.event_id for event in events}
+        for event in events:
+            key = stable_event_id(event)
+            if key in batch_keys or key in existing_keys:
+                raise ValueError("duplicate stable event key")
+            batch_keys.add(key)
+
+        for link in links:
+            if link.event_id not in event_ids:
+                raise ValueError(f"link references unknown event_id {link.event_id}")
+        for tag in tags:
+            if tag["event_id"] not in event_ids:
+                raise ValueError(f"tag references unknown event_id {tag['event_id']}")
+
+        if events:
+            placeholders = ", ".join("?" for _ in range(len(_MARKET_EVENT_COLUMNS) + 1))
+            columns = ", ".join(("run_id", *_MARKET_EVENT_COLUMNS))
+            self.connection.executemany(
+                f"""INSERT INTO staging_market_events ({columns})
+                    VALUES ({placeholders})""",
+                [self._market_event_row(event, run_id=run_id) for event in events],
+            )
+        if links:
+            self.connection.executemany(
+                """INSERT INTO staging_event_symbol_links
+                   (run_id, event_id, symbol, role, available_at, source)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (run_id, link.event_id, link.symbol, link.role, link.available_at, link.source)
+                    for link in links
+                ],
+            )
+        if tags:
+            self.connection.executemany(
+                """INSERT INTO staging_event_tags
+                   (run_id, event_id, tag_key, tag_value)
+                   VALUES (?, ?, ?, ?)""",
+                [
+                    (run_id, tag["event_id"], tag["tag_key"], tag["tag_value"])
+                    for tag in tags
+                ],
+            )
+
+    def _validate_staging_event_bundle(self, run_id: str) -> list[str]:
+        rows = self.connection.execute(
+            """SELECT event_id, pit_level, available_at, quality_status
+                FROM staging_market_events WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        errors: list[str] = []
+        for event_id, pit_level, available_at, _quality in rows:
+            if pit_level == PITLevel.PIT_REQUIRED.value and available_at is None:
+                errors.append(f"{event_id}: pit_required event requires available_at")
+        link_rows = self.connection.execute(
+            """SELECT event_id FROM staging_event_symbol_links WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        event_ids = {row[0] for row in rows}
+        for (link_event_id,) in link_rows:
+            if link_event_id not in event_ids:
+                errors.append(f"link references missing event {link_event_id}")
+        tag_rows = self.connection.execute(
+            """SELECT event_id FROM staging_event_tags WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        for (tag_event_id,) in tag_rows:
+            if tag_event_id not in event_ids:
+                errors.append(f"tag references missing event {tag_event_id}")
+        return errors
+
+    def _staging_event_bundle_hash(self, run_id: str) -> str:
+        event_rows = self.connection.execute(
+            f"""SELECT {', '.join(_MARKET_EVENT_COLUMNS)}
+                FROM staging_market_events WHERE run_id = ?
+                ORDER BY event_id""",
+            [run_id],
+        ).fetchall()
+        link_rows = self.connection.execute(
+            """SELECT event_id, symbol, role, available_at, source
+               FROM staging_event_symbol_links WHERE run_id = ?
+               ORDER BY event_id, symbol, role""",
+            [run_id],
+        ).fetchall()
+        tag_rows = self.connection.execute(
+            """SELECT event_id, tag_key, tag_value
+               FROM staging_event_tags WHERE run_id = ?
+               ORDER BY event_id, tag_key""",
+            [run_id],
+        ).fetchall()
+        return _hash_payload({
+            "events": [list(row) for row in event_rows],
+            "links": [list(row) for row in link_rows],
+            "tags": [list(row) for row in tag_rows],
+        })
+
+    def _copy_staging_event_bundle(self, run_id: str, version_id: str) -> None:
+        event_rows = self.connection.execute(
+            f"""SELECT {', '.join(_MARKET_EVENT_COLUMNS)}
+                FROM staging_market_events WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if event_rows:
+            self.connection.executemany(
+                f"""INSERT OR REPLACE INTO market_events
+                    ({', '.join(_MARKET_EVENT_COLUMNS)}, dataset_version_id)
+                    VALUES ({', '.join('?' for _ in range(21))})""",
+                [(*row, version_id) for row in event_rows],
+            )
+        link_rows = self.connection.execute(
+            """SELECT event_id, symbol, role, available_at, source
+               FROM staging_event_symbol_links WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if link_rows:
+            self.connection.executemany(
+                """INSERT OR REPLACE INTO event_symbol_links
+                   (event_id, symbol, role, available_at, source, dataset_version_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [(*row, version_id) for row in link_rows],
+            )
+        tag_rows = self.connection.execute(
+            """SELECT event_id, tag_key, tag_value
+               FROM staging_event_tags WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if tag_rows:
+            self.connection.executemany(
+                """INSERT OR REPLACE INTO event_tags
+                   (event_id, tag_key, tag_value, dataset_version_id)
+                   VALUES (?, ?, ?, ?)""",
+                [(*row, version_id) for row in tag_rows],
+            )
+
+    def publish_event_bundle(self, run_id: str) -> str:
+        run = self.connection.execute(
+            "SELECT dataset FROM ingestion_runs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        if run is None:
+            raise ValueError(f"unknown ingestion run {run_id}")
+        if run[0] != "market_events":
+            raise ValueError(f"run {run_id} is not a market_events ingestion run")
+
+        errors = self._validate_staging_event_bundle(run_id)
+        if errors:
+            summary = "; ".join(errors)
+            self.mark_ingestion_failed(run_id, summary)
+            raise ValueError(f"event bundle quality gate failed: {summary}")
+
+        content_hash = self._staging_event_bundle_hash(run_id)
+        existing = self.find_published_version_by_hash("market_events", content_hash)
+        if existing is not None:
+            now = datetime.now(tz=SHANGHAI)
+            self.connection.execute(
+                """UPDATE ingestion_runs
+                   SET status = 'PUBLISHED', finished_at = ?, error_summary = NULL
+                   WHERE run_id = ?""",
+                [now, run_id],
+            )
+            self._clear_staging_for_run(run_id)
+            return existing["version_id"]
+
+        version_id = str(uuid.uuid4())
+        now = datetime.now(tz=SHANGHAI)
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            self.connection.execute(
+                """INSERT INTO dataset_versions
+                   (version_id, dataset, status, published_at, ingestion_run_id, content_hash)
+                   VALUES (?, ?, 'STAGING', NULL, ?, ?)""",
+                [version_id, "market_events", run_id, content_hash],
+            )
+            self._copy_staging_event_bundle(run_id, version_id)
+            self.connection.execute(
+                """UPDATE dataset_versions
+                   SET status = 'PUBLISHED', published_at = ?
+                   WHERE version_id = ?""",
+                [now, version_id],
+            )
+            self.connection.execute(
+                """UPDATE ingestion_runs
+                   SET status = 'PUBLISHED', finished_at = ?, error_summary = NULL
+                   WHERE run_id = ?""",
+                [now, run_id],
+            )
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        self._clear_staging_for_run(run_id)
+        return version_id
+
+    def get_market_events(
+        self,
+        symbols: list[str],
+        available_before: datetime,
+    ) -> list[dict[str, Any]]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        rows = self.connection.execute(
+            f"""SELECT DISTINCT e.event_id, e.event_type, e.title, e.summary,
+                       e.published_at, e.available_at, e.source, e.source_url,
+                       e.source_record_id, e.source_version, e.content_hash,
+                       e.pit_level, e.sentiment, e.severity, e.announcement_date_source,
+                       e.quality_status, e.supersedes_event_id
+                FROM market_events e
+                INNER JOIN event_symbol_links l ON e.event_id = l.event_id
+                LEFT JOIN dataset_versions v ON e.dataset_version_id = v.version_id
+                LEFT JOIN dataset_versions lv ON l.dataset_version_id = lv.version_id
+                WHERE l.symbol IN ({placeholders})
+                  AND e.available_at IS NOT NULL
+                  AND e.available_at <= ?
+                  AND e.quality_status != 'rejected'
+                  AND (e.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+                  AND (l.dataset_version_id IS NULL OR lv.status = 'PUBLISHED')
+                ORDER BY e.available_at, e.event_id""",
+            [*symbols, available_before],
+        ).fetchall()
+        columns = [
+            "event_id", "event_type", "title", "summary", "published_at", "available_at",
+            "source", "source_url", "source_record_id", "source_version", "content_hash",
+            "pit_level", "sentiment", "severity", "announcement_date_source",
+            "quality_status", "supersedes_event_id",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def upsert_board_aliases(self, rows: Iterable[dict]) -> None:
+        values = [
+            (
+                row["board_type"],
+                row["board_code"],
+                row["alias"],
+                row["alias_normalized"],
+                row["source"],
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO board_aliases
+               (board_type, board_code, alias, alias_normalized, source)
+               VALUES (?, ?, ?, ?, ?)""",
+            values,
+        )
+
+    def lookup_board_aliases(self, alias_normalized: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT board_type, board_code, alias, alias_normalized, source
+               FROM board_aliases
+               WHERE alias_normalized = ?
+               ORDER BY board_type, board_code""",
+            [alias_normalized],
+        ).fetchall()
+        columns = ["board_type", "board_code", "alias", "alias_normalized", "source"]
+        return [dict(zip(columns, row)) for row in rows]
 
     def mark_ingestion_failed(self, run_id: str, error_summary: str) -> None:
         now = datetime.now(tz=SHANGHAI)
