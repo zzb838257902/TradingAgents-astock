@@ -49,6 +49,19 @@ def _resolve_live_dates(
     return snapshot.isoformat(), screening.isoformat(), backfill_start.isoformat()
 
 
+def _resolve_signal_trade_date(backfill_start: str, screening_date: str) -> str:
+    """Match run_screen signal_date = trading_dates[-2] in the backfill window."""
+    from tradingagents.market_data.providers.free_astock_sources import LiveFreeAStockSourceBackend
+
+    backend = LiveFreeAStockSourceBackend()
+    start = date.fromisoformat(backfill_start)
+    end = date.fromisoformat(screening_date)
+    open_days = backend.fetch_sse_trade_dates(start, end)
+    if len(open_days) >= 2:
+        return open_days[-2].isoformat()
+    return screening_date
+
+
 def _run(
     cmd: list[str],
     *,
@@ -177,11 +190,13 @@ def main() -> int:
             snapshot_date=args.snapshot_date,
             screening_date=args.screening_date,
         )
+        signal_trade_date = _resolve_signal_trade_date(backfill_start, screening_date)
         fixture_trade_date = FIXTURE_TRADE_DATE
     else:
         snapshot_date = screening_date = backfill_start = (
             args.screening_date or args.snapshot_date or FIXTURE_TRADE_DATE
         )
+        signal_trade_date = snapshot_date
         fixture_trade_date = snapshot_date
     report: dict = {
         "home_dir": str(home_dir),
@@ -190,6 +205,7 @@ def main() -> int:
         "snapshot_date": snapshot_date,
         "screening_date": screening_date,
         "backfill_start": backfill_start,
+        "signal_trade_date": signal_trade_date,
         "fixture_trade_date": fixture_trade_date,
         "live": args.live,
         "smoke": args.smoke,
@@ -204,6 +220,7 @@ def main() -> int:
         *,
         required: bool = True,
         expect_status: set[str] | None = None,
+        expect_screening_ok: bool = False,
     ) -> None:
         ok = result["exit_code"] == 0
         if ok and result.get("stdout", "").strip().startswith("{"):
@@ -217,6 +234,16 @@ def main() -> int:
                     ok = probe_status == "published"
                 elif status is not None and status not in {"published", "success"}:
                     ok = False
+                if expect_screening_ok:
+                    screening_report = payload.get("report") or {}
+                    if screening_report.get("status") != "ok":
+                        ok = False
+                    if int(screening_report.get("included_count") or 0) < 1:
+                        ok = False
+                    if not screening_report.get("ranking"):
+                        ok = False
+                    if not screening_report.get("target_weights"):
+                        ok = False
                 if not ok:
                     result = {
                         **result,
@@ -340,12 +367,12 @@ def main() -> int:
                 [
                     sys.executable, "-m", "tradingagents.market_data.cli", "sync",
                     "--dataset", "adjustment-factors",
-                    "--as-of", screening_date,
+                    "--as-of", signal_trade_date,
                     *symbol_flag,
                     "--home-dir", str(live_home),
                     "--provider", "free",
                 ],
-                not args.smoke,
+                True,
             ),
             (
                 "daily-live",
@@ -376,6 +403,7 @@ def main() -> int:
                 "scheduler_live_after_close",
                 live_run(scheduler_cmd),
                 expect_status={"success"},
+                expect_screening_ok=True,
             )
 
     print(json.dumps(report, ensure_ascii=False, indent=2))

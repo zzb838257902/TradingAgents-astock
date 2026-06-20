@@ -9,22 +9,39 @@ def count_trading_days_after(
     return sum(1 for value in trading_dates if list_date < value <= as_of)
 
 
+def count_listing_trading_days(
+    list_date: date,
+    as_of: date,
+    open_trade_dates: list[date],
+) -> int:
+    """Count open trade days strictly after list_date through as_of."""
+    return sum(1 for value in open_trade_dates if list_date < value <= as_of)
+
+
 def filter_universe(
     candidates: list[CandidateInput],
     as_of: date,
     min_listing_days: int,
     min_avg_amount_20d: float,
     trading_dates: list[date] | None = None,
+    *,
+    listing_trade_dates: list[date] | None = None,
 ) -> UniverseResult:
     included = []
     excluded: dict[str, list[str]] = {}
-    calendar = sorted(trading_dates) if trading_dates else None
+    listing_calendar: list[date] | None
+    if listing_trade_dates:
+        listing_calendar = sorted(listing_trade_dates)
+    elif trading_dates:
+        listing_calendar = sorted(trading_dates)
+    else:
+        listing_calendar = None
     for item in candidates:
         reasons = []
         if item.st_flag:
             reasons.append("st")
-        if calendar is not None:
-            if count_trading_days_after(item.list_date, as_of, calendar) < min_listing_days:
+        if listing_calendar is not None:
+            if count_listing_trading_days(item.list_date, as_of, listing_calendar) < min_listing_days:
                 reasons.append("new_listing")
         elif (as_of - item.list_date).days < min_listing_days:
             reasons.append("new_listing")

@@ -89,9 +89,7 @@ def build_pit_rows_from_xdxr(
         if prev_close is None:
             prev_close = default_prev_close
         if prev_close is None or prev_close <= 0:
-            raise ValueError(
-                f"{symbol} xdxr on {ex_date.isoformat()} requires prev_close for adjustment"
-            )
+            continue
         step = forward_adjustment_ratio(
             fenhong,
             peigu,
@@ -225,3 +223,35 @@ def baseline_factor_row(
         "available_at": available_at,
         "source": source,
     }
+
+
+def ensure_factor_baseline(
+    factor_rows: list[dict],
+    symbol: str,
+    anchor_date: date,
+    *,
+    available_at: datetime,
+    source: str,
+) -> list[dict]:
+    """Prepend factor=1.0 anchor so bars before the first ex_date remain adjustable."""
+    if not factor_rows:
+        return [
+            baseline_factor_row(
+                symbol,
+                anchor_date,
+                available_at=available_at,
+                source=source,
+            )
+        ]
+    earliest_factor_date = min(row["trade_date"] for row in factor_rows)
+    if anchor_date >= earliest_factor_date:
+        return factor_rows
+    return [
+        baseline_factor_row(
+            symbol,
+            anchor_date,
+            available_at=available_at,
+            source=source,
+        ),
+        *factor_rows,
+    ]

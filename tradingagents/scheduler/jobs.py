@@ -62,6 +62,16 @@ def _recent_trading_dates(repo: MarketDataRepository, trade_date: date, count: i
     return dates[-count:]
 
 
+def _bar_history_trading_dates(
+    repo: MarketDataRepository,
+    trade_date: date,
+    config: ScreenerConfig,
+) -> list[date]:
+    """Enough history for 20d liquidity and listing-day gates."""
+    count = max(30, config.universe.min_listing_days + 1, 20)
+    return _recent_trading_dates(repo, trade_date, count=count)
+
+
 def run_after_close(
     trade_date: date,
     config: ScreenerConfig,
@@ -180,7 +190,7 @@ def run_after_close(
                     sync_steps=sync_steps,
                 )
             symbols = resolved.symbols
-            trading_dates = _recent_trading_dates(repo, trade_date)
+            trading_dates = _bar_history_trading_dates(repo, trade_date, config)
             fixture = build_fixture_from_repository(repo, symbols, trading_dates, signal_time)
 
         report = run_screen(

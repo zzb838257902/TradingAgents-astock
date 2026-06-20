@@ -15,10 +15,11 @@ from tradingagents.market_data.contracts import (
     SecurityRecord,
     TradingDay,
 )
-from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai
+from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai, post_close_signal_time
 from tradingagents.market_data.adjustments import (
     baseline_factor_row,
     build_pit_rows_from_xdxr,
+    ensure_factor_baseline,
     resolve_prev_close_from_bars,
 )
 from tradingagents.market_data.providers.existing_astock import ExistingAStockProvider
@@ -62,6 +63,17 @@ def _result(
         pit_level=pit_level,
         errors=errors or [],
     )
+
+
+def _earliest_bar_trade_date(bars: list[dict]) -> date | None:
+    dates: list[date] = []
+    for bar in bars:
+        trade_date = bar.get("trade_date")
+        if isinstance(trade_date, str):
+            trade_date = date.fromisoformat(trade_date)
+        if isinstance(trade_date, date):
+            dates.append(trade_date)
+    return min(dates) if dates else None
 
 
 class FreeAStockProvider:
@@ -334,9 +346,16 @@ class FreeAStockProvider:
         return self._current_only_members("index", code, as_of)
 
     def fetch_adjustment_factor_rows(
-        self, symbols: Sequence[str]
+        self,
+        symbols: Sequence[str],
+        *,
+        as_of: date | None = None,
     ) -> DataResult[tuple[list[dict], list[dict]]]:
         run_time = datetime.now(tz=SHANGHAI)
+        factor_date = as_of or run_time.date()
+        available_at = post_close_signal_time(factor_date)
+        if run_time.date() == factor_date:
+            available_at = max(available_at, run_time)
         factor_rows: list[dict] = []
         action_rows: list[dict] = []
         errors: list[str] = []
@@ -349,6 +368,8 @@ class FreeAStockProvider:
                     run_time.date(),
                 )
                 daily_bars = daily_result.data or []
+                anchor_date = _earliest_bar_trade_date(daily_bars) or factor_date
+                anchor_available = post_close_signal_time(anchor_date)
 
                 def prev_close_resolver(ex_date: date, bars: list[dict] = daily_bars) -> float | None:
                     return resolve_prev_close_from_bars(bars, ex_date)
@@ -359,23 +380,23 @@ class FreeAStockProvider:
                     source=self.name,
                     prev_close_resolver=prev_close_resolver,
                 )
-                if not factors:
-                    factors = [
-                        baseline_factor_row(
-                            symbol,
-                            run_time.date(),
-                            available_at=run_time,
-                            source=self.name,
-                        )
-                    ]
+                factors = ensure_factor_baseline(
+                    factors,
+                    symbol,
+                    anchor_date,
+                    available_at=anchor_available,
+                    source=self.name,
+                )
                 factor_rows.extend(factors)
                 action_rows.extend(actions)
-            except Exception:
+            except Exception as exc:
+                errors.append(f"{symbol}: {exc}")
+                anchor_date = factor_date
                 factor_rows.append(
                     baseline_factor_row(
                         symbol,
-                        run_time.date(),
-                        available_at=run_time,
+                        anchor_date,
+                        available_at=post_close_signal_time(anchor_date),
                         source=self.name,
                     )
                 )

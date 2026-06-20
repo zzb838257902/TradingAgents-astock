@@ -51,3 +51,18 @@ def test_new_listing_uses_trading_days_not_calendar_days():
     )
     assert result.included == []
     assert result.excluded_reasons["C"] == ["new_listing"]
+
+
+def test_listing_days_use_full_calendar_not_bar_window():
+    short_bar_window = [date(2026, 6, 12), date(2026, 6, 15), date(2026, 6, 16), date(2026, 6, 17)]
+    full_calendar = [date(2026, 1, 2) + __import__("datetime").timedelta(days=i) for i in range(200)]
+    full_calendar = [day for day in full_calendar if day.weekday() < 5]
+    result = filter_universe(
+        [candidate("OLD", list_date=date(1999, 11, 10))],
+        as_of=date(2026, 6, 17),
+        min_listing_days=60,
+        min_avg_amount_20d=1,
+        trading_dates=short_bar_window,
+        listing_trade_dates=full_calendar,
+    )
+    assert [item.symbol for item in result.included] == ["OLD"]

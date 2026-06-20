@@ -348,6 +348,29 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
     return df
 
 
+# mootdx daily volume is reported in lots (手); normalize to shares (股).
+_MOOTDX_VOLUME_LOT_SIZE = 100
+
+
+def _normalize_mootdx_daily_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize mootdx OHLCV to shares (volume) and yuan (amount)."""
+    out = df.copy()
+    out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce") * _MOOTDX_VOLUME_LOT_SIZE
+    if "Amount" in out.columns:
+        out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce")
+    else:
+        out["Amount"] = pd.to_numeric(out["Close"], errors="coerce") * out["Volume"]
+    return out
+
+
+def _normalize_sina_daily_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Sina K-line volume is already in shares; derive amount in yuan."""
+    out = df.copy()
+    out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce")
+    out["Amount"] = pd.to_numeric(out["Close"], errors="coerce") * out["Volume"]
+    return out
+
+
 def _supplement_kline_from_sina(
     df: pd.DataFrame,
     code: str,
@@ -367,7 +390,7 @@ def _supplement_kline_from_sina(
 
     base = df.copy()
     base["Date"] = pd.to_datetime(base["Date"])
-    sina_df = sina_df.copy()
+    sina_df = _normalize_sina_daily_frame(sina_df.copy())
     sina_df["Date"] = pd.to_datetime(sina_df["Date"])
     have = set(base["Date"].dt.normalize())
     start_dt = pd.to_datetime(start_date)
@@ -443,6 +466,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
         df = df.rename(columns=rename_map)
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df["Date"] = pd.to_datetime(df["Date"])
+        df = _normalize_mootdx_daily_frame(df)
     except Exception as e:
         logger.warning("mootdx OHLCV failed for %s: %s, trying sina HTTP fallback", code, e)
         # Fallback: Sina direct HTTP API
@@ -450,6 +474,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
             df = _sina_kline_fallback(code)
             if df.empty:
                 raise ValueError(f"No OHLCV data from sina for {code}")
+            df = _normalize_sina_daily_frame(df)
         except Exception:
             raise ValueError(f"No OHLCV data from mootdx/sina for {code}")
 
@@ -503,6 +528,7 @@ def get_stock_data(
             }
         )
         df["Date"] = pd.to_datetime(df["Date"])
+        df = _normalize_mootdx_daily_frame(df)
 
     except Exception as e:
         logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
@@ -511,6 +537,7 @@ def get_stock_data(
             df = _sina_kline_fallback(code, start_date, end_date)
             if df.empty:
                 return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+            df = _normalize_sina_daily_frame(df)
             data_source = "sina HTTP (fallback)"
         except Exception:
             return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"

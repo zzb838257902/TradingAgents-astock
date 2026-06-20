@@ -45,6 +45,25 @@ def _resolve_signal_date(trading_dates: list[date]) -> date:
     return trading_dates[-2]
 
 
+def _listing_trade_dates_for_screening(
+    repo: MarketDataRepository,
+    signal_date: date,
+    min_listing_days: int,
+) -> list[date] | None:
+    stored = sorted(day for day in repo.list_open_trade_dates() if day <= signal_date)
+    if len(stored) > min_listing_days:
+        return stored
+    try:
+        from tradingagents.market_data.providers.free_astock_sources import LiveFreeAStockSourceBackend
+
+        return LiveFreeAStockSourceBackend().fetch_sse_trade_dates(
+            date(1990, 1, 1),
+            signal_date,
+        )
+    except Exception:
+        return stored or None
+
+
 def _portfolio_target_weights(portfolio, portfolio_value: float) -> dict[str, float]:
     if portfolio_value <= 0:
         return {}
@@ -76,10 +95,26 @@ def _collect_dataset_versions(repo: MarketDataRepository) -> dict[str, dict | No
 
 
 def _collect_data_sources(fixture: dict, repo: MarketDataRepository, signal_time: datetime) -> dict[str, str]:
-    sources = {"daily_bars": "fixture", "financials": "fixture"}
+    sources: dict[str, str] = {}
     securities = repo.get_effective_securities_for_screening(signal_time.date(), signal_time)
     if securities:
         sources["security_master"] = securities[0].source
+    symbol = None
+    for item in fixture.get("symbols", []):
+        symbol = item.get("symbol")
+        if symbol:
+            break
+    if symbol:
+        bars = repo.get_daily_bars(
+            [symbol],
+            end=signal_time.date(),
+            available_before=signal_time,
+        )
+        if bars:
+            sources["daily_bars"] = str(bars[-1].get("source", "unknown"))
+        financials = repo.get_financials([symbol], available_before=signal_time)
+        if financials:
+            sources["financials"] = str(financials[-1].get("source", "unknown"))
     return sources
 
 
@@ -246,6 +281,11 @@ def run_screen(
         min_listing_days=config.universe.min_listing_days,
         min_avg_amount_20d=config.universe.min_avg_amount_20d,
         trading_dates=trading_dates,
+        listing_trade_dates=_listing_trade_dates_for_screening(
+            repo,
+            signal_date,
+            config.universe.min_listing_days,
+        ),
     )
     if not universe.included:
         return _base_report(

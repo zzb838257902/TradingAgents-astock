@@ -582,7 +582,7 @@ class MarketDataSync:
                 status=SyncStatus.ERROR,
                 errors=["no symbols available for adjustment factor sync"],
             )
-        fetched = fetch(target_symbols)
+        fetched = fetch(target_symbols, as_of=target_date)
         if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
             return self._error_result("adjustment_factors", fetched)
         factor_rows, action_rows = fetched.data or ([], [])
