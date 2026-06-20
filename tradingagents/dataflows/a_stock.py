@@ -298,9 +298,8 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     return dfs[0] if dfs else pd.DataFrame()
 
 
-# ---------------------------------------------------------------------------
-# Sina K-line fallback helper (direct HTTP, no akshare)
-# ---------------------------------------------------------------------------
+# Sina SSE index daily bars cap the trade-calendar lookback window.
+SINA_SSE_CALENDAR_MAX_BARS = 800
 
 
 def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
@@ -317,7 +316,7 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
         "symbol": f"{prefix}{code}",
         "scale": "240",  # daily
         "ma": "no",
-        "datalen": "800",
+        "datalen": str(SINA_SSE_CALENDAR_MAX_BARS),
     }
     r = _requests.get(url, params=params, timeout=15)
     r.raise_for_status()
@@ -813,7 +812,7 @@ def get_fundamentals(
                                 else:
                                     lines.append(
                                         f"EPS declining ({cagr * 100:.0f}%), "
-                                        f"PEG not applicable"
+                                        "PEG not applicable"
                                     )
                 except Exception as e:
                     logger.warning("Forward PE calc failed for %s: %s", code, e)
@@ -847,12 +846,14 @@ def _sina_finance_report_list_to_dataframe(payload: dict) -> pd.DataFrame:
     report_list = payload.get("report_list") or {}
     rows: list[dict] = []
     for period_key, entry in report_list.items():
+        ann_date, ann_source = _resolve_sina_announcement_date(
+            str(period_key),
+            entry.get("publish_date"),
+        )
         row: dict = {
             "报告日": str(period_key),
-            "公告日期": _resolve_sina_announcement_date(
-                str(period_key),
-                entry.get("publish_date"),
-            ),
+            "公告日期": ann_date,
+            "announcement_date_source": ann_source,
         }
         for item in entry.get("data") or []:
             title = item.get("item_title")
@@ -909,17 +910,20 @@ def _max_announcement_lag_days(period_end: date) -> int:
     return 40
 
 
-def _resolve_sina_announcement_date(period_key: str, publish_date_raw: Any) -> str | None:
+def _resolve_sina_announcement_date(
+    period_key: str,
+    publish_date_raw: Any,
+) -> tuple[str | None, str]:
     """Reject Sina comparison-column publish_date; fall back to regulatory deadline."""
     period_end = _report_period_end_date(period_key)
     if period_end is None:
-        return None
+        return None, "regulatory_deadline"
     publish = _parse_sina_publish_date(publish_date_raw)
     if publish is not None and publish > period_end:
         lag_days = (publish - period_end).days
         if lag_days <= _max_announcement_lag_days(period_end):
-            return publish.isoformat()
-    return _regulatory_announcement_deadline(period_end).isoformat()
+            return publish.isoformat(), "reported"
+    return _regulatory_announcement_deadline(period_end).isoformat(), "regulatory_deadline"
 
 
 def _get_financial_report_sina(
@@ -1387,7 +1391,7 @@ def get_profit_forecast(
 
         lines = [
             f"# Consensus EPS Forecast for {code} (A-stock)",
-            f"# Source: 同花顺 analyst consensus (direct HTTP)",
+            "# Source: 同花顺 analyst consensus (direct HTTP)",
             f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
         ]
@@ -1499,12 +1503,12 @@ def get_hot_stocks(
         if not rows:
             return (
                 f"No hot stocks data for {curr_date} "
-                f"(may be non-trading day or data not yet available)"
+                "(may be non-trading day or data not yet available)"
             )
 
         lines = [
             f"# Hot Stocks with Topic Attribution ({curr_date})",
-            f"# Source: 同花顺 editorial (human-curated reason tags)",
+            "# Source: 同花顺 editorial (human-curated reason tags)",
             f"# Total: {len(rows)} stocks",
             "",
         ]

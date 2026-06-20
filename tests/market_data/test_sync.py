@@ -138,7 +138,7 @@ def test_sync_trade_calendar_publishes_open_days(tmp_path):
     paths = MarketDataPaths(home_dir=tmp_path)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
     sync = MarketDataSync(repo, _mock_provider(), paths)
-    result = sync.sync_trade_calendar(date(2026, 1, 1), date(2026, 1, 31))
+    result = sync.sync_trade_calendar(date(2026, 1, 2), date(2026, 1, 31))
     assert result.status == SyncStatus.PUBLISHED
     days = repo.get_trade_calendar(
         "SSE",

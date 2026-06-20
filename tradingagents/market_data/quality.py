@@ -134,6 +134,49 @@ def build_backfill_completeness_report(
     )
 
 
+def build_trade_calendar_range_report(
+    requested_start: date,
+    requested_end: date,
+    actual_open_dates: list[date],
+    *,
+    source_limit_bars: int,
+) -> CoverageReport:
+    if not actual_open_dates:
+        return CoverageReport(
+            dataset="trade_calendar_range",
+            status="fail",
+            numerator=0,
+            denominator=1,
+            ratio=0.0,
+            threshold=1.0,
+            details=[{
+                "requested_start": requested_start.isoformat(),
+                "requested_end": requested_end.isoformat(),
+                "source_limit_bars": source_limit_bars,
+            }],
+        )
+    actual_start = min(actual_open_dates)
+    actual_end = max(actual_open_dates)
+    covers_start = actual_start <= requested_start
+    status = "pass" if covers_start else "fail"
+    return CoverageReport(
+        dataset="trade_calendar_range",
+        status=status,
+        numerator=1 if covers_start else 0,
+        denominator=1,
+        ratio=1.0 if covers_start else 0.0,
+        threshold=1.0,
+        details=[{
+            "requested_start": requested_start.isoformat(),
+            "requested_end": requested_end.isoformat(),
+            "actual_start": actual_start.isoformat(),
+            "actual_end": actual_end.isoformat(),
+            "actual_count": len(actual_open_dates),
+            "source_limit_bars": source_limit_bars,
+        }],
+    )
+
+
 def build_financial_field_quality_report(
     rows: list[dict],
     target_symbols: list[str],

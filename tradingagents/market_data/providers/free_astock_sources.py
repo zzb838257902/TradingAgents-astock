@@ -9,10 +9,12 @@ from typing import Any, Protocol
 import pandas as pd
 
 from tradingagents.market_data.financials import (
+    DEFAULT_RECORD_TYPE,
     _EQUITY_KEYS,
     _NET_PROFIT_KEYS,
     _ROE_DIRECT_KEYS,
     derive_roe,
+    normalize_reported_roe,
 )
 from tradingagents.market_data.market_hours import SHANGHAI
 from tradingagents.market_data.sync_policy import shanghai_today
@@ -91,7 +93,6 @@ class FreeAStockSourceBackend(Protocol):
         self,
         symbol: str,
         announced_before: datetime,
-        open_dates: list[date] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def fetch_xdxr_frame(self, symbol: str) -> list[dict[str, Any]]: ...
@@ -242,25 +243,29 @@ class LiveFreeAStockSourceBackend:
         self,
         symbol: str,
         announced_before: datetime,
-        open_dates: list[date] | None = None,
     ) -> list[dict[str, Any]]:
-        from tradingagents.market_data.financials import (
-            DEFAULT_RECORD_TYPE,
-            derive_roe,
-            financial_available_at,
-            normalize_reported_roe,
-        )
+        import os
+        import time
+
         from tradingagents.dataflows.a_stock import (
             _get_financial_report_sina,
             _normalize_ticker,
         )
 
         code = _normalize_ticker(symbol)
-        income = _get_financial_report_sina(code, "利润表", "quarterly")
-        cashflow = _get_financial_report_sina(code, "现金流量表", "quarterly")
-        balance = _get_financial_report_sina(code, "资产负债表", "quarterly")
+        request_interval = float(os.environ.get("FINANCIAL_REQUEST_INTERVAL", "0.05"))
+        reports = ("利润表", "现金流量表", "资产负债表")
+        frames: dict[str, pd.DataFrame] = {}
+        for index, report_type in enumerate(reports):
+            if index > 0 and request_interval > 0:
+                time.sleep(request_interval)
+            frames[report_type] = _get_financial_report_sina(code, report_type, "quarterly")
+        income = frames["利润表"]
+        cashflow = frames["现金流量表"]
+        balance = frames["资产负债表"]
         if income.empty:
             return []
+        cutoff_date = announced_before.date()
         rows: list[dict[str, Any]] = []
         for _, income_row in income.iterrows():
             report_period = _report_period_from_row(income_row)
@@ -269,13 +274,9 @@ class LiveFreeAStockSourceBackend:
             announcement_date = _announcement_date_from_row(income_row)
             if announcement_date is None:
                 continue
-            available_at = financial_available_at(
-                announcement_date,
-                None,
-                open_dates=open_dates,
-            )
-            if available_at > announced_before:
+            if announcement_date > cutoff_date:
                 continue
+            ann_source = _announcement_date_source_from_row(income_row)
             cash_row = _match_report_row(cashflow, report_period)
             balance_row = _match_report_row(balance, report_period)
             net_profit = _float_field(income_row, _NET_PROFIT_KEYS)
@@ -300,7 +301,7 @@ class LiveFreeAStockSourceBackend:
                 "net_profit": net_profit,
                 "debt_ratio": _debt_ratio(balance_row),
                 "announcement_date": announcement_date,
-                "available_at": available_at,
+                "announcement_date_source": ann_source,
                 "source": "free_astock",
                 "record_type": (
                     DEFAULT_RECORD_TYPE
@@ -334,6 +335,14 @@ def _announcement_date_from_row(row: pd.Series) -> date | None:
             if parsed is not None:
                 return parsed
     return None
+
+
+def _announcement_date_source_from_row(row: pd.Series) -> str:
+    if "announcement_date_source" in row.index:
+        value = row.get("announcement_date_source")
+        if value in {"reported", "regulatory_deadline"}:
+            return str(value)
+    return "reported"
 
 
 def _match_report_row(frame: pd.DataFrame, report_period: str) -> pd.Series | None:

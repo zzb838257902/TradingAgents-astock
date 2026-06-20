@@ -19,7 +19,9 @@ from tradingagents.market_data.quality import (
     build_financial_field_quality_report,
     build_financial_symbol_coverage_report,
     build_security_coverage_report,
+    build_trade_calendar_range_report,
 )
+from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
 from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync_policy import (
@@ -172,6 +174,25 @@ class MarketDataSync:
         if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
             return self._error_result("trade_calendar", fetched)
         days = fetched.data or []
+        open_dates = sorted(day.trade_date for day in days if day.is_open)
+        range_report = build_trade_calendar_range_report(
+            start,
+            end,
+            open_dates,
+            source_limit_bars=SINA_SSE_CALENDAR_MAX_BARS,
+        )
+        if range_report.status != "pass":
+            return SyncResult(
+                dataset="trade_calendar",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "trade calendar source does not cover requested start: "
+                    f"requested {start.isoformat()}, actual from "
+                    f"{range_report.details[0]['actual_start']} "
+                    f"(Sina SSE index limited to ~{SINA_SSE_CALENDAR_MAX_BARS} bars)"
+                ],
+                coverage_reports={"trade_calendar_range": range_report},
+            )
         run_id = self.repository.begin_ingestion_run(
             "trade_calendar",
             {"start": start.isoformat(), "end": end.isoformat()},
@@ -200,6 +221,7 @@ class MarketDataSync:
             run_id=run_id,
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
+            coverage_reports={"trade_calendar_range": range_report},
         )
 
     def sync_daily(self, trade_date: date) -> SyncResult:
@@ -517,10 +539,26 @@ class MarketDataSync:
                 ],
             )
         open_dates = self.repository.list_open_trade_dates()
-        normalized = [
-            normalize_financial_row(row, open_dates=open_dates or None)
-            for row in rows
-        ]
+        if not open_dates:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=["trade_calendar must be synced before financials"],
+            )
+        normalized = []
+        for row in rows:
+            item = normalize_financial_row(row, open_dates=open_dates)
+            if item["available_at"] <= as_of:
+                normalized.append(item)
+        if not normalized:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    f"no financial records visible at {as_of.isoformat()} "
+                    f"for {len(target_symbols)} symbols"
+                ],
+            )
         coverage = build_financial_symbol_coverage_report(
             normalized,
             target_symbols,

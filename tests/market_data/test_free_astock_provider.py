@@ -58,17 +58,9 @@ class _MockBackend:
         self,
         symbol: str,
         announced_before: datetime,
-        open_dates: list[date] | None = None,
     ) -> list[dict]:
-        from tradingagents.market_data.financials import financial_available_at
-
         announcement_date = date(2026, 1, 2)
-        available_at = financial_available_at(
-            announcement_date,
-            None,
-            open_dates=open_dates or [date(2026, 1, 2), date(2026, 1, 3)],
-        )
-        if available_at > announced_before:
+        if announcement_date > announced_before.date():
             return []
         return [{
             "symbol": symbol,
@@ -78,7 +70,7 @@ class _MockBackend:
             "net_profit": 500_000.0,
             "debt_ratio": 0.4,
             "announcement_date": announcement_date,
-            "available_at": available_at,
+            "announcement_date_source": "reported",
             "source": "free_astock",
             "record_type": "indicator",
         }]
@@ -180,15 +172,15 @@ def test_free_provider_board_members_are_current_only():
 
 def test_free_provider_financials_require_announcement_date():
     provider = FreeAStockProvider(backend=_MockBackend())
-    before_open = datetime(2026, 1, 2, 16, 0, tzinfo=SHANGHAI)
-    result = provider.get_financials(["600000"], before_open)
+    before_announcement = datetime(2026, 1, 1, 16, 0, tzinfo=SHANGHAI)
+    result = provider.get_financials(["600000"], before_announcement)
     assert result.status == DataStatus.SUCCESS_EMPTY
 
-    after_next_open = datetime(2026, 1, 5, 10, 0, tzinfo=SHANGHAI)
-    result = provider.get_financials(["600000"], after_next_open)
+    after_announcement = datetime(2026, 1, 5, 10, 0, tzinfo=SHANGHAI)
+    result = provider.get_financials(["600000"], after_announcement)
     assert result.status == DataStatus.OK
     assert result.data[0]["announcement_date"] == date(2026, 1, 2)
-    assert result.data[0]["available_at"] == datetime(2026, 1, 3, 9, 0, tzinfo=SHANGHAI)
+    assert "available_at" not in result.data[0]
 
 
 def test_free_provider_fetch_adjustment_factor_rows():

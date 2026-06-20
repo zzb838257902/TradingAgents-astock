@@ -78,7 +78,7 @@ def test_partial_probe_is_persisted_and_trade_calendar_syncs(tmp_path):
     assert stored["trade_calendar"]["permitted"] is True
     assert stored["daily_bars"]["permitted"] is False
 
-    result = sync.sync_trade_calendar(date(2026, 1, 1), date(2026, 1, 3))
+    result = sync.sync_trade_calendar(date(2026, 1, 2), date(2026, 1, 3))
     assert result.status == SyncStatus.PUBLISHED
     assert repo.list_open_trade_dates()
 
@@ -188,6 +188,9 @@ def test_sina_financial_report_rejects_stale_comparison_publish_date():
 
     with patch.object(a_stock._requests, "get", return_value=_Resp()):
         frame = a_stock._get_financial_report_sina("600000", "利润表", "quarterly")
-    by_period = {str(row["报告日"]): row["公告日期"] for _, row in frame.iterrows()}
-    assert by_period["20240630"] == "2024-08-31"
-    assert by_period["20250630"] == "2025-08-28"
+    by_period = {
+        str(row["报告日"]): (row["公告日期"], row.get("announcement_date_source"))
+        for _, row in frame.iterrows()
+    }
+    assert by_period["20240630"] == ("2024-08-31", "regulatory_deadline")
+    assert by_period["20250630"] == ("2025-08-28", "reported")

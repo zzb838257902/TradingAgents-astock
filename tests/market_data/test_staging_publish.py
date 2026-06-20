@@ -10,6 +10,7 @@ from tradingagents.market_data.providers.free_astock import FreeAStockProvider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync, SyncStatus
 from tests.market_data.test_free_astock_provider import _MockBackend
+from tests.market_data.test_sync_coverage_gates import _seed_calendar
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -17,6 +18,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 def test_sync_financials_publishes_version_id(tmp_path):
     paths = MarketDataPaths(home_dir=tmp_path)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    _seed_calendar(repo)
     provider = FreeAStockProvider(backend=_MockBackend())
     sync = MarketDataSync(repo, provider, paths)
     sync.probe_capabilities()

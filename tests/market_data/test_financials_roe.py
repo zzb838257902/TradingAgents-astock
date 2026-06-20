@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -59,6 +59,39 @@ def test_financial_row_passes_quality_gate_rejects_zero_roe_with_profit():
         "debt_ratio": 0.5,
         "operating_cashflow": 80.0,
     })
+
+
+def test_financial_available_at_skips_holiday_gap():
+    from tradingagents.market_data.financials import financial_available_at
+
+    open_dates = [
+        date(2026, 4, 30),
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+    ]
+    available = financial_available_at(
+        date(2026, 4, 30),
+        open_dates=open_dates,
+    )
+    assert available.date() == date(2026, 5, 6)
+    assert available.hour == 9
+
+
+def test_normalize_financial_row_tags_regulatory_announcement_source():
+    from tradingagents.market_data.financials import normalize_financial_row
+
+    row = normalize_financial_row({
+        "symbol": "600000",
+        "report_period": "20240630",
+        "roe": 0.08,
+        "operating_cashflow": 1.0,
+        "net_profit": 1.0,
+        "debt_ratio": 0.5,
+        "announcement_date": date(2024, 8, 31),
+        "announcement_date_source": "regulatory_deadline",
+        "source": "free_astock",
+    }, open_dates=[date(2024, 8, 31), date(2024, 9, 2)])
+    assert "ann:regulatory_deadline" in (row.get("source_version") or "")
 
 
 def test_build_financial_field_quality_report_counts_symbols():

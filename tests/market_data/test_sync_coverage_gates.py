@@ -15,6 +15,7 @@ from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
     build_backfill_completeness_report,
     build_financial_symbol_coverage_report,
+    build_trade_calendar_range_report,
 )
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync, SyncStatus
@@ -164,9 +165,25 @@ class _FinancialProvider(_BackfillProvider):
         )
 
 
+def test_sync_financials_blocks_without_trade_calendar(tmp_path):
+    paths = MarketDataPaths(home_dir=tmp_path)
+    repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    repo.save_sync_state("capability_probe", {
+        "financials": {"permitted": True},
+    })
+    sync = MarketDataSync(repo, _FinancialProvider(), paths)
+    result = sync.sync_financials(
+        datetime(2026, 6, 18, 16, 0, tzinfo=SHANGHAI),
+        symbols=["600000"],
+    )
+    assert result.status == SyncStatus.BLOCKED
+    assert "trade_calendar must be synced" in result.errors[0]
+
+
 def test_sync_financials_blocks_low_field_quality(tmp_path):
     paths = MarketDataPaths(home_dir=tmp_path)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    _seed_calendar(repo)
     repo.save_sync_state("capability_probe", {
         "financials": {"permitted": True},
     })
@@ -178,6 +195,17 @@ def test_sync_financials_blocks_low_field_quality(tmp_path):
     assert result.status == SyncStatus.BLOCKED
     assert "field quality below threshold" in result.errors[0]
     assert result.coverage_reports["financial_field_quality"].numerator == 1
+
+
+def test_trade_calendar_range_report_blocks_early_start():
+    report = build_trade_calendar_range_report(
+        date(1990, 1, 1),
+        date(2026, 6, 18),
+        [date(2023, 3, 1), date(2026, 6, 18)],
+        source_limit_bars=800,
+    )
+    assert report.status == "fail"
+    assert report.details[0]["actual_start"] == "2023-03-01"
 
 
 def test_financial_symbol_coverage_uses_target_symbol_denominator():

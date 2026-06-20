@@ -49,6 +49,15 @@ def _resolve_live_dates(
     return snapshot.isoformat(), screening.isoformat(), backfill_start.isoformat()
 
 
+def _resolve_trade_calendar_start(screening_date: str) -> str:
+    """Align request window with Sina SSE ~800-bar trade-calendar limit."""
+    from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
+
+    margin_days = int(SINA_SSE_CALENDAR_MAX_BARS * 7 / 5) + 30
+    start = date.fromisoformat(screening_date) - timedelta(days=margin_days)
+    return max(start, date(1990, 1, 1)).isoformat()
+
+
 def _resolve_signal_trade_date(backfill_start: str, screening_date: str) -> str:
     """Match run_screen signal_date = trading_dates[-2] in the backfill window."""
     from tradingagents.market_data.providers.free_astock_sources import LiveFreeAStockSourceBackend
@@ -191,12 +200,14 @@ def main() -> int:
             screening_date=args.screening_date,
         )
         signal_trade_date = _resolve_signal_trade_date(backfill_start, screening_date)
+        trade_calendar_start = _resolve_trade_calendar_start(screening_date)
         fixture_trade_date = FIXTURE_TRADE_DATE
     else:
         snapshot_date = screening_date = backfill_start = (
             args.screening_date or args.snapshot_date or FIXTURE_TRADE_DATE
         )
         signal_trade_date = snapshot_date
+        trade_calendar_start = snapshot_date
         fixture_trade_date = snapshot_date
     report: dict = {
         "home_dir": str(home_dir),
@@ -206,6 +217,8 @@ def main() -> int:
         "screening_date": screening_date,
         "backfill_start": backfill_start,
         "signal_trade_date": signal_trade_date,
+        "trade_calendar_start": trade_calendar_start,
+        "trade_calendar_note": "Sina SSE index calendar is capped at ~800 trading bars",
         "fixture_trade_date": fixture_trade_date,
         "live": args.live,
         "smoke": args.smoke,
@@ -330,7 +343,7 @@ def main() -> int:
                 [
                     sys.executable, "-m", "tradingagents.market_data.cli", "sync",
                     "--dataset", "trade-calendar",
-                    "--start", "1990-01-01",
+                    "--start", trade_calendar_start,
                     "--end", screening_date,
                     "--home-dir", str(live_home),
                     "--provider", "free",

@@ -72,17 +72,17 @@ def normalize_financial_row(row: dict, *, open_dates: Iterable[date] | None = No
     if isinstance(actual_time, str):
         actual_time = ensure_aware_shanghai(datetime.fromisoformat(actual_time))
 
-    available_at = row.get("available_at")
-    if available_at is None:
-        available_at = financial_available_at(
-            announcement_date,
-            actual_time,
-            open_dates=open_dates,
-        )
-    elif isinstance(available_at, str):
-        available_at = ensure_aware_shanghai(datetime.fromisoformat(available_at))
-    else:
-        available_at = ensure_aware_shanghai(available_at)
+    available_at = financial_available_at(
+        announcement_date,
+        actual_time,
+        open_dates=open_dates,
+    )
+
+    ann_source = row.get("announcement_date_source") or "reported"
+    source_version = row.get("source_version")
+    if ann_source != "reported":
+        ann_tag = f"ann:{ann_source}"
+        source_version = ann_tag if not source_version else f"{source_version};{ann_tag}"
 
     return {
         "symbol": row["symbol"],
@@ -95,7 +95,7 @@ def normalize_financial_row(row: dict, *, open_dates: Iterable[date] | None = No
         "actual_announcement_time": actual_time,
         "available_at": available_at,
         "update_flag": row.get("update_flag") or "",
-        "source_version": row.get("source_version"),
+        "source_version": source_version,
         "record_type": row.get("record_type") or DEFAULT_RECORD_TYPE,
         "source": row["source"],
         "ingested_at": row.get("ingested_at"),

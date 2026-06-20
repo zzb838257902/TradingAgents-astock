@@ -257,11 +257,7 @@ class FreeAStockProvider:
                 time.sleep(interval)
             try:
                 rows.extend(
-                    self._backend.fetch_sina_financial_rows(
-                        symbol,
-                        announced_before,
-                        open_dates=None,
-                    )
+                    self._backend.fetch_sina_financial_rows(symbol, announced_before)
                 )
             except Exception as exc:
                 errors.append(f"{symbol}: {exc}")
@@ -473,7 +469,6 @@ class FreeAStockProvider:
                         self._backend.fetch_sina_financial_rows(
                             sample_symbols[0],
                             run_time,
-                            open_dates=open_dates,
                         )
                         permitted = True
                     else:

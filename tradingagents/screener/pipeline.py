@@ -285,7 +285,7 @@ def run_screen(
             status=ScreeningStatus.DATA_ERROR,
             errors=[
                 "trade_calendar in repository is shorter than min_listing_days; "
-                "sync trade-calendar from 1990-01-01 before screening"
+                "sync trade-calendar before screening"
             ],
             data_quality=data_quality,
         )

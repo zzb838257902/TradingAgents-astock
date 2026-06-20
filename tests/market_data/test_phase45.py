@@ -117,6 +117,7 @@ def test_sync_financials_from_fixture_provider(tmp_path):
     provider = FixtureProvider(fixture)
     sync = MarketDataSync(repo, provider, paths)
     sync.probe_capabilities()
+    sync.sync_trade_calendar(date(2026, 1, 2), date(2026, 1, 3))
     as_of = datetime(2026, 1, 3, 15, 30, tzinfo=SHANGHAI)
     result = sync.sync_financials(as_of, symbols=["600001"])
     assert result.status.value == "published"
