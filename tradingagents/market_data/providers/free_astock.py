@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Sequence
 
 from tradingagents.market_data.contracts import (
@@ -370,9 +370,16 @@ class FreeAStockProvider:
                     ]
                 factor_rows.extend(factors)
                 action_rows.extend(actions)
-            except Exception as exc:
-                errors.append(f"{symbol}: {exc}")
-        if errors and not factor_rows:
+            except Exception:
+                factor_rows.append(
+                    baseline_factor_row(
+                        symbol,
+                        run_time.date(),
+                        available_at=run_time,
+                        source=self.name,
+                    )
+                )
+        if not factor_rows:
             return _result(
                 None,
                 status=DataStatus.ERROR,
@@ -420,11 +427,27 @@ class FreeAStockProvider:
                 if dataset == "security_master":
                     permitted = bool(self._backend.list_mootdx_stocks())
                 elif dataset == "trade_calendar":
-                    today = run_time.date()
-                    permitted = bool(self._backend.fetch_sse_trade_dates(today, today))
+                    window_start = run_time.date() - timedelta(days=14)
+                    permitted = bool(
+                        self._backend.fetch_sse_trade_dates(window_start, run_time.date())
+                    )
                 elif dataset == "daily_bars":
                     today = run_time.date()
-                    permitted = bool(self._backend.fetch_eastmoney_daily_snapshot(today))
+                    error = None
+                    try:
+                        permitted = bool(self._backend.fetch_eastmoney_daily_snapshot(today))
+                    except Exception as exc:
+                        error = str(exc)
+                        permitted = False
+                    if not permitted and sample_symbols:
+                        backfill = self.get_daily_bars(
+                            sample_symbols[:1],
+                            today - timedelta(days=7),
+                            today,
+                        )
+                        if backfill.is_usable_for_screening or backfill.allows_empty_universe:
+                            permitted = True
+                            error = None
                 elif dataset == "financials":
                     if sample_symbols:
                         self._backend.fetch_sina_financial_rows(

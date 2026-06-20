@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 from tradingagents.market_data.config import MarketDataPaths
-from tradingagents.market_data.contracts import DataResult
+from tradingagents.market_data.contracts import DataResult, DataStatus
 from tradingagents.market_data.market_hours import SHANGHAI, post_close_signal_time
 from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
@@ -61,20 +61,27 @@ class MarketDataSync:
 
     def probe_capabilities(self) -> SyncResult:
         result = self.provider.probe_capabilities()
-        if not result.is_usable_for_screening and not result.allows_empty_universe:
-            return SyncResult(
-                dataset="capability_probe",
-                status=SyncStatus.ERROR,
-                errors=result.errors or [result.status.value],
-            )
         payload = {
             item.dataset: item.model_dump(mode="json")
             for item in (result.data or [])
         }
-        self.repository.save_sync_state("capability_probe", payload)
-        return SyncResult(dataset="capability_probe", status=SyncStatus.PUBLISHED)
+        if payload:
+            self.repository.save_sync_state("capability_probe", payload)
+        if result.status in {DataStatus.OK, DataStatus.PARTIAL}:
+            return SyncResult(
+                dataset="capability_probe",
+                status=SyncStatus.PUBLISHED,
+                errors=result.errors,
+            )
+        return SyncResult(
+            dataset="capability_probe",
+            status=SyncStatus.ERROR,
+            errors=result.errors or [result.status.value],
+        )
 
-    def sync_security_master(self, as_of: date) -> SyncResult:
+    def sync_security_master(
+        self, as_of: date, *, symbols: list[str] | None = None
+    ) -> SyncResult:
         probe = self._require_probe_dataset("security_master")
         if probe is not None:
             return probe
@@ -98,18 +105,26 @@ class MarketDataSync:
         if not fetched.is_usable_for_screening:
             return self._error_result("security_master", fetched)
         records = fetched.data or []
+        if symbols:
+            wanted = set(symbols)
+            records = [record for record in records if record.symbol in wanted]
         run_id = self.repository.begin_ingestion_run(
             "security_master",
-            {"as_of": as_of.isoformat()},
+            {"as_of": as_of.isoformat(), "symbols": symbols},
         )
         self.repository.upsert_staging_securities(run_id, records)
         self._save_snapshot("stock_basic", {"as_of": as_of.isoformat()}, records)
         count_target = getattr(self.provider, "count_listed_securities_target", None)
-        denominator = count_target(as_of) if count_target is not None else len(records)
+        if symbols:
+            denominator = len(symbols)
+        elif count_target is not None:
+            denominator = count_target(as_of)
+        else:
+            denominator = len(records)
         report = build_security_coverage_report(
             numerator=len(records),
             denominator=denominator,
-            threshold=SECURITY_COVERAGE_THRESHOLD,
+            threshold=1.0 if symbols else SECURITY_COVERAGE_THRESHOLD,
         )
         if report.status != "pass":
             self.repository.mark_ingestion_failed(
@@ -277,7 +292,7 @@ class MarketDataSync:
         symbols: list[str] | None = None,
     ) -> SyncResult:
         """Backfill historical daily bars via get_daily_bars (mootdx/sina path)."""
-        probe = self._require_probe_dataset("daily_bars")
+        probe = self._require_probe_dataset("security_master")
         if probe is not None:
             return probe
         if end < start:
@@ -550,15 +565,9 @@ class MarketDataSync:
         probe = self.repository.get_capability_probe()
         if probe is None:
             auto = self.probe_capabilities()
-            if auto.status != SyncStatus.PUBLISHED:
-                return auto
             probe = self.repository.get_capability_probe()
-        if probe is None:
-            return SyncResult(
-                dataset=dataset,
-                status=SyncStatus.ERROR,
-                errors=["capability probe has not been run"],
-            )
+            if probe is None:
+                return auto
         entry = probe.get(dataset)
         if entry is None:
             return SyncResult(

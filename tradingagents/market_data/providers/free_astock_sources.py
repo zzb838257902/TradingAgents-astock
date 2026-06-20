@@ -23,12 +23,16 @@ _FALLBACK_MOOTDX_SERVERS: tuple[tuple[str, int], ...] = (
 
 def _mootdx_quotes_client():
     """Connect to mootdx HQ, falling back when bestip scan is blocked."""
+    import os
+
     from mootdx.quotes import Quotes
 
-    try:
-        return Quotes.factory(market="std", bestip=True, timeout=10)
-    except OSError:
-        pass
+    skip_bestip = os.environ.get("MOOTDX_SKIP_BESTIP", "").lower() in {"1", "true", "yes"}
+    if not skip_bestip:
+        try:
+            return Quotes.factory(market="std", bestip=True, timeout=10)
+        except OSError:
+            pass
     servers: list[tuple[str, int]] = list(_FALLBACK_MOOTDX_SERVERS)
     try:
         from mootdx.consts import HQ_HOSTS

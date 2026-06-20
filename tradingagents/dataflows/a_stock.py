@@ -149,9 +149,11 @@ def _get_mootdx_client():
     """Lazy-init mootdx Quotes client (TCP connection, reusable)."""
     global _mootdx_client
     if _mootdx_client is None:
-        from mootdx.quotes import Quotes
+        from tradingagents.market_data.providers.free_astock_sources import (
+            _mootdx_quotes_client,
+        )
 
-        _mootdx_client = Quotes.factory(market="std")
+        _mootdx_client = _mootdx_quotes_client()
     return _mootdx_client
 
 
@@ -790,7 +792,7 @@ def _get_financial_report_sina(
     r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
     d = r.json()
 
-    result = d.get("result", {}).get("data", {})
+    result = (d.get("result") or {}).get("data") or {}
     items = result.get(source_type, [])
     if not isinstance(items, list) or not items:
         return pd.DataFrame()
