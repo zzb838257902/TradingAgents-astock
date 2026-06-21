@@ -20,6 +20,7 @@ from tradingagents.market_data.financials import (
 )
 from tradingagents.market_data.market_hours import SHANGHAI
 from tradingagents.market_data.sync_policy import shanghai_today
+from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
 _A_SHARE_CODE = re.compile(r"^[036]\d{5}$")
 
@@ -32,37 +33,8 @@ _FALLBACK_MOOTDX_SERVERS: tuple[tuple[str, int], ...] = (
 
 
 def _mootdx_quotes_client():
-    """Connect to mootdx HQ, falling back when bestip scan is blocked."""
-    import os
-
-    from mootdx.quotes import Quotes
-
-    skip_bestip = os.environ.get("MOOTDX_SKIP_BESTIP", "").lower() in {"1", "true", "yes"}
-    if not skip_bestip:
-        try:
-            return Quotes.factory(market="std", bestip=True, timeout=10)
-        except OSError:
-            pass
-    servers: list[tuple[str, int]] = list(_FALLBACK_MOOTDX_SERVERS)
-    try:
-        from mootdx.consts import HQ_HOSTS
-        from tdxpy.constants import hq_hosts
-
-        for host in hq_hosts[:12] + HQ_HOSTS[:8]:
-            servers.append((host[1], int(host[2])))
-    except Exception:
-        pass
-    seen: set[tuple[str, int]] = set()
-    last_error: Exception | None = None
-    for server in servers:
-        if server in seen:
-            continue
-        seen.add(server)
-        try:
-            return Quotes.factory(market="std", server=server, timeout=10)
-        except Exception as exc:
-            last_error = exc
-    raise OSError(f"unable to connect to mootdx HQ server: {last_error}")
+    """Return the shared mootdx client (connect only; prefer manager.call for I/O)."""
+    return get_mootdx_manager().connect()
 
 
 def _parse_yyyymmdd(value: Any) -> date | None:
@@ -234,11 +206,11 @@ class LiveFreeAStockSourceBackend:
     """Production backend delegating to existing a_stock / mootdx integrations."""
 
     def list_mootdx_stocks(self) -> list[dict[str, Any]]:
-        client = _mootdx_quotes_client()
+        manager = get_mootdx_manager()
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for market in (0, 1):
-            frame = client.stocks(market=market)
+            frame = manager.call(lambda client, m=market: client.stocks(market=m))
             if frame is None or frame.empty:
                 continue
             for record in frame.to_dict(orient="records"):
@@ -444,8 +416,9 @@ class LiveFreeAStockSourceBackend:
         return rows
 
     def fetch_xdxr_frame(self, symbol: str) -> list[dict[str, Any]]:
-        client = _mootdx_quotes_client()
-        frame = client.xdxr(symbol=symbol)
+        frame = get_mootdx_manager().call(
+            lambda client, code=symbol: client.xdxr(symbol=code)
+        )
         if frame is None or frame.empty:
             return []
         return frame.to_dict(orient="records")

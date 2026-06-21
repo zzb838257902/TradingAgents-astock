@@ -142,19 +142,18 @@ def resolve_ticker(user_input: str) -> str:
 # mootdx client (singleton)
 # ---------------------------------------------------------------------------
 
-_mootdx_client = None
+
+def _call_mootdx(operation):
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
+
+    return get_mootdx_manager().call(operation)
 
 
 def _get_mootdx_client():
     """Lazy-init mootdx Quotes client (TCP connection, reusable)."""
-    global _mootdx_client
-    if _mootdx_client is None:
-        from tradingagents.market_data.providers.free_astock_sources import (
-            _mootdx_quotes_client,
-        )
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
-        _mootdx_client = _mootdx_quotes_client()
-    return _mootdx_client
+    return get_mootdx_manager().connect()
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +443,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Fetch from mootdx — 800 daily bars (~3 years of trading days)
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        df = _call_mootdx(lambda client: client.bars(symbol=code, category=4, offset=800))
 
         if df is None or df.empty:
             raise ValueError(f"No OHLCV data from mootdx for {code}")
@@ -503,8 +501,7 @@ def get_stock_data(
 
     data_source = "mootdx (TCP)"
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        df = _call_mootdx(lambda client: client.bars(symbol=code, category=4, offset=800))
 
         if df is None or df.empty:
             raise ValueError(f"No data from mootdx for {code}")
@@ -695,8 +692,7 @@ def get_fundamentals(
 
         # --- mootdx: financial snapshot (quarterly) ---
         try:
-            client = _get_mootdx_client()
-            fin = client.finance(symbol=code)
+            fin = _call_mootdx(lambda client: client.finance(symbol=code))
             if fin is not None and not (
                 isinstance(fin, pd.DataFrame) and fin.empty
             ):
@@ -1338,8 +1334,7 @@ def get_insider_transactions(
     code = _normalize_ticker(ticker)
 
     try:
-        client = _get_mootdx_client()
-        text = client.F10(symbol=code, name="股东研究")
+        text = _call_mootdx(lambda client: client.F10(symbol=code, name="股东研究"))
 
         if not text or not text.strip():
             return f"No insider/shareholder data found for A-stock '{code}'"
