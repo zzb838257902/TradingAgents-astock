@@ -115,7 +115,7 @@ def test_sync_daily_indicators_is_idempotent(tmp_path):
     assert first.content_hash == second.content_hash
 
 
-def test_sync_daily_indicators_success_empty_publishes(tmp_path):
+def test_sync_daily_indicators_success_empty_publishes_for_fixture_only(tmp_path):
     run_time = post_close_signal_time(TRADE_DATE)
     provider = _IndicatorProvider(DataResult(
         data=[],
@@ -130,6 +130,70 @@ def test_sync_daily_indicators_success_empty_publishes(tmp_path):
     assert result.status == SyncStatus.PUBLISHED
     latest = sync.repository.get_latest_published_version("daily_indicators")
     assert latest is not None
+
+
+def test_sync_rejects_success_empty_from_free_provider(tmp_path):
+    run_time = post_close_signal_time(TRADE_DATE)
+    provider = _IndicatorProvider(DataResult(
+        data=[],
+        status=DataStatus.SUCCESS_EMPTY,
+        source="free_astock",
+        as_of=run_time,
+        available_at=run_time,
+        pit_level=PITLevel.BEST_EFFORT,
+    ))
+    provider.name = "free_astock"
+    sync = _setup(tmp_path, provider)
+    result = sync.sync_daily_indicators(TRADE_DATE)
+    assert result.status == SyncStatus.BLOCKED
+    assert sync.repository.get_latest_published_version("daily_indicators") is None
+
+
+def test_sync_blocks_non_trading_day(tmp_path):
+    provider = _IndicatorProvider(_ok_result([_indicator_row("600000"), _indicator_row("000001")]))
+    sync = _setup(tmp_path, provider)
+    result = sync.sync_daily_indicators(date(2026, 1, 4))
+    assert result.status == SyncStatus.BLOCKED
+    assert "not an open trade date" in result.errors[0]
+    assert provider.calls == 0
+
+
+def test_unpublished_daily_indicators_are_not_visible(tmp_path):
+    provider = _IndicatorProvider(_ok_result([_indicator_row("600000"), _indicator_row("000001")]))
+    sync = _setup(tmp_path, provider)
+    sync.repository.connection.execute(
+        """
+        INSERT INTO daily_indicators (
+            symbol, trade_date, pe_ttm, pb, turnover_pct,
+            total_market_cap_cny, float_market_cap_cny,
+            available_at, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            "600000",
+            TRADE_DATE,
+            6.5,
+            0.7,
+            0.4,
+            320_000_000_000.0,
+            290_000_000_000.0,
+            post_close_signal_time(TRADE_DATE),
+            "shadow",
+        ],
+    )
+    assert sync.repository.get_daily_indicators(
+        ["600000"],
+        TRADE_DATE,
+        post_close_signal_time(TRADE_DATE),
+    ) == []
+    sync.sync_daily_indicators(TRADE_DATE)
+    rows = sync.repository.get_daily_indicators(
+        ["600000"],
+        TRADE_DATE,
+        post_close_signal_time(TRADE_DATE),
+    )
+    assert len(rows) == 1
+    assert rows[0]["source"] == "fixture"
 
 
 def test_sync_daily_indicators_historical_not_available_is_blocked(tmp_path):

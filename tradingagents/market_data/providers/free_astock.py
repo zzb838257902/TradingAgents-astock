@@ -29,7 +29,6 @@ from tradingagents.market_data.providers.free_astock_sources import (
     LiveFreeAStockSourceBackend,
     ProviderFetchError,
     normalize_tencent_daily_indicator_row,
-    _post_close_available_at,
 )
 from tradingagents.events.contracts import MarketEvent
 from tradingagents.events.normalizer import normalize_fund_flow_row, normalize_hot_topic_row, normalize_news_row
@@ -56,6 +55,7 @@ _EVENT_PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
 ]
 
 _DEFAULT_INDICATOR_BATCH_SIZE = 80
+_DEFAULT_INDICATOR_BATCH_PAUSE = 0.3
 _FETCH_ERROR_TO_STATUS = {
     "network_error": DataStatus.NETWORK_ERROR,
     "http_error": DataStatus.HTTP_ERROR,
@@ -107,7 +107,7 @@ class FreeAStockProvider:
         backend: FreeAStockSourceBackend | None = None,
         *,
         batch_size: int = _DEFAULT_INDICATOR_BATCH_SIZE,
-        batch_pause: float = 0.0,
+        batch_pause: float = _DEFAULT_INDICATOR_BATCH_PAUSE,
         sleeper: Callable[[float], None] | None = None,
         random_fn: Callable[[float, float], float] | None = None,
         retry_base_delay: float = 0.5,
@@ -301,7 +301,20 @@ class FreeAStockProvider:
                 errors=[str(exc)],
             )
 
+        if not symbols:
+            return _result(
+                None,
+                status=DataStatus.DATA_QUALITY_FAILED,
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.BEST_EFFORT,
+                errors=["empty symbol universe for daily_indicators"],
+            )
+
         rows: list[dict] = []
+        total_raw = 0
+        parse_failures = 0
         for batch_index, batch_start in enumerate(range(0, len(symbols), self._batch_size)):
             batch = symbols[batch_start:batch_start + self._batch_size]
             if batch_index > 0:
@@ -319,6 +332,7 @@ class FreeAStockProvider:
                     pit_level=PITLevel.BEST_EFFORT,
                     errors=[exc.message],
                 )
+            total_raw += len(raw_rows)
             for raw in raw_rows:
                 symbol = str(raw.get("symbol", "")).strip()
                 try:
@@ -331,17 +345,33 @@ class FreeAStockProvider:
                         )
                     )
                 except ValueError:
-                    continue
+                    parse_failures += 1
 
-        status = DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY
-        available_at = (
-            max(row["available_at"] for row in rows)
-            if rows
-            else _post_close_available_at(trade_date)
-        )
+        if not rows:
+            if total_raw == 0:
+                return _result(
+                    None,
+                    status=DataStatus.PARSE_ERROR,
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=run_time,
+                    pit_level=PITLevel.BEST_EFFORT,
+                    errors=["tencent returned no quotes for requested symbols"],
+                )
+            return _result(
+                None,
+                status=DataStatus.PARSE_ERROR,
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.BEST_EFFORT,
+                errors=[f"all {parse_failures} indicator rows failed validation"],
+            )
+
+        available_at = max(row["available_at"] for row in rows)
         return _result(
             rows,
-            status=status,
+            status=DataStatus.OK,
             source=self.name,
             as_of=run_time,
             available_at=available_at,

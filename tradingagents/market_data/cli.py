@@ -13,6 +13,7 @@ from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.providers.factory import create_resolved_provider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
+from tradingagents.market_data.sync_policy import shanghai_today
 
 app = typer.Typer(help="TradingAgents market data sync")
 
@@ -99,7 +100,7 @@ def sync_dataset(
             trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
             result = sync.sync_daily(trade_date)
     elif dataset in {"daily-indicators", "daily_indicators"}:
-        trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
+        trade_date = date.fromisoformat(start or as_of or shanghai_today().isoformat())
         result = sync.sync_daily_indicators(trade_date)
     elif dataset == "memberships":
         if not as_of or not board_type or not board_code:

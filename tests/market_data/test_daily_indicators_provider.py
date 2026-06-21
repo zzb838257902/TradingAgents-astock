@@ -112,12 +112,43 @@ def test_free_provider_historical_date_is_not_available_yet():
     assert backend.calls == 0
 
 
-def test_free_provider_supplier_empty():
+def test_free_provider_empty_tencent_response_is_parse_error():
     backend = _IndicatorBackend([])
     provider = FreeAStockProvider(backend)
     result = provider.get_daily_indicators(shanghai_today())
-    assert result.status == DataStatus.SUCCESS_EMPTY
-    assert result.data == []
+    assert result.status == DataStatus.PARSE_ERROR
+    assert result.data is None
+    assert "no quotes" in result.errors[0]
+
+
+def test_free_provider_empty_symbol_list_is_error():
+    class _EmptyUniverseBackend(_IndicatorBackend):
+        def list_mootdx_stocks(self) -> list[dict]:
+            return []
+
+    backend = _EmptyUniverseBackend()
+    provider = FreeAStockProvider(backend)
+    result = provider.get_daily_indicators(shanghai_today())
+    assert result.status == DataStatus.DATA_QUALITY_FAILED
+    assert result.data is None
+    assert backend.calls == 0
+
+
+def test_free_provider_all_parse_failures_is_parse_error():
+    backend = _IndicatorBackend([{
+        "symbol": "600000",
+        "mcap_yi": -1.0,
+        "float_mcap_yi": 1.0,
+    }])
+    provider = FreeAStockProvider(backend)
+    result = provider.get_daily_indicators(shanghai_today())
+    assert result.status == DataStatus.PARSE_ERROR
+    assert "failed validation" in result.errors[0]
+
+
+def test_free_provider_default_batch_pause_is_positive():
+    provider = FreeAStockProvider(_IndicatorBackend())
+    assert provider._batch_pause > 0
 
 
 def test_free_provider_http_error():

@@ -26,10 +26,7 @@ from tradingagents.market_data.quality import (
 )
 from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
-from tradingagents.market_data.sync_policy import (
-    live_snapshot_date_error,
-    security_snapshot_write_error,
-)
+from tradingagents.market_data.sync_policy import live_snapshot_date_error, security_snapshot_write_error
 
 DAILY_COMPLETENESS_THRESHOLD = 0.995
 BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD = 1.0
@@ -372,6 +369,10 @@ class MarketDataSync:
         )
 
     def sync_daily_indicators(self, trade_date: date) -> SyncResult:
+        blocked = self._require_open_trade_date(trade_date, "daily_indicators")
+        if blocked is not None:
+            return blocked
+
         fetched = self.provider.get_daily_indicators(trade_date)
         if fetched.status == DataStatus.NOT_AVAILABLE_YET:
             return SyncResult(
@@ -384,6 +385,15 @@ class MarketDataSync:
 
         run_time = datetime.now(tz=SHANGHAI)
         if fetched.status == DataStatus.SUCCESS_EMPTY and not (fetched.data or []):
+            if getattr(self.provider, "name", "") != "fixture":
+                return SyncResult(
+                    dataset="daily_indicators",
+                    status=SyncStatus.BLOCKED,
+                    errors=fetched.errors or [
+                        "SUCCESS_EMPTY requires fixture supplier confirmation; "
+                        "refusing to publish unverified empty indicators",
+                    ],
+                )
             run_id = self.repository.begin_ingestion_run(
                 "daily_indicators",
                 {
@@ -880,6 +890,24 @@ class MarketDataSync:
             status=SyncStatus.ERROR,
             errors=fetched.errors or [fetched.status.value],
         )
+
+    def _require_open_trade_date(self, trade_date: date, dataset: str) -> SyncResult | None:
+        open_dates = self.repository.list_open_trade_dates()
+        if open_dates:
+            if trade_date not in open_dates:
+                return SyncResult(
+                    dataset=dataset,
+                    status=SyncStatus.BLOCKED,
+                    errors=[f"{trade_date.isoformat()} is not an open trade date"],
+                )
+            return None
+        if trade_date.weekday() >= 5:
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.BLOCKED,
+                errors=[f"{trade_date.isoformat()} is not a trading day"],
+            )
+        return None
 
     def _save_snapshot(self, endpoint: str, params: dict[str, Any], payload: Any) -> None:
         if self.repository.snapshot_dir is None:

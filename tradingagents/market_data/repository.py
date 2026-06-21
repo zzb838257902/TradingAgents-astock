@@ -371,11 +371,11 @@ class MarketDataRepository:
                    i.total_market_cap_cny, i.float_market_cap_cny,
                    i.available_at, i.source
             FROM daily_indicators i
-            LEFT JOIN dataset_versions v ON i.dataset_version_id = v.version_id
+            INNER JOIN dataset_versions v ON i.dataset_version_id = v.version_id
             WHERE i.symbol IN ({placeholders})
               AND i.trade_date = ?
               AND i.available_at <= ?
-              AND (i.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+              AND v.status = 'PUBLISHED'
             ORDER BY i.symbol
         """
         params.extend([trade_date, available_before])
