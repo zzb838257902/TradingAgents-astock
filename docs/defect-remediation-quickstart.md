@@ -44,7 +44,7 @@ MOOTDX_SKIP_BESTIP=1 PYTHONPATH='.pip_packages:.' \
 | Step | 验证内容 |
 |------|----------|
 | `live_tencent_indicators` | 腾讯指标 HTTP（600000） |
-| `live_mootdx_connect` | mootdx `stocks(market=0)`（独立子进程 + `subprocess` 硬超时，默认 60s） |
+| `live_mootdx_connect` | mootdx TCP（`--probe-mootdx` 子进程；轻量 `bars(600000)` 探测，避免 `stocks()` 触发 bestip 扫描） |
 | `live_repository_screen` | 真实库选股路径（fixture 种子库，不依赖外网） |
 
 三项 **独立执行**；任一项网络不可达映射为 `network blocked` → 整体 **BLOCKED/exit 2**（非 FAIL）。腾讯失败时仍会探测 mootdx 并跑 repository。

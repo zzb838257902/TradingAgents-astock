@@ -532,10 +532,12 @@ def run_probe_subprocess(
 def probe_mootdx_connect_payload() -> dict[str, Any]:
     from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
-    frame = get_mootdx_manager().call(lambda client: client.stocks(market=0))
+    frame = get_mootdx_manager().call(
+        lambda client: client.bars(symbol="600000", category=4, offset=1),
+    )
     if frame is None or len(frame) < 1:
-        raise AssertionError("mootdx stocks(market=0) returned empty frame")
-    return {"row_count": len(frame)}
+        raise AssertionError("mootdx bars(600000) returned empty frame")
+    return {"symbol": "600000", "bar_count": len(frame)}
 
 
 def _main_probe_mootdx() -> int:
