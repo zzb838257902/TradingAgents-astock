@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import cli.main as main_cli
 from cli.models import AnalystType
-from cli.utils import ANALYST_ORDER as CLI_ANALYST_ORDER
+from cli.utils import ANALYST_CHOICES as CLI_ANALYST_CHOICES
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.pipeline import run_fixture_backtest, run_screen
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
@@ -105,24 +105,42 @@ def test_disabled_event_enrichment_preserves_stage4_equivalence(tmp_path: Path):
         assert baseline[key] == with_metadata[key], key
 
 
-def test_cli_exposes_four_analysts_with_frozen_mappings():
-    assert main_cli.ANALYST_ORDER == ["market", "social", "news", "fundamentals"]
+def test_cli_exposes_seven_analysts_with_frozen_mappings():
+    assert main_cli.ANALYST_ORDER == [
+        "market",
+        "social",
+        "news",
+        "fundamentals",
+        "policy",
+        "hot_money",
+        "lockup",
+    ]
     assert main_cli.ANALYST_AGENT_NAMES == {
         "market": "Market Analyst",
         "social": "Social Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
+        "policy": "Policy Analyst",
+        "hot_money": "Hot_money Analyst",
+        "lockup": "Lockup Analyst",
     }
     assert main_cli.ANALYST_REPORT_MAP == {
         "market": "market_report",
         "social": "sentiment_report",
         "news": "news_report",
         "fundamentals": "fundamentals_report",
+        "policy": "policy_report",
+        "hot_money": "hot_money_report",
+        "lockup": "lockup_report",
     }
-    assert len(CLI_ANALYST_ORDER) == 4
-    assert [value for _, value in CLI_ANALYST_ORDER] == [
+    assert len(CLI_ANALYST_CHOICES) == 7
+    assert [value for _, value in CLI_ANALYST_CHOICES] == [
         AnalystType.MARKET,
         AnalystType.SOCIAL,
         AnalystType.NEWS,
         AnalystType.FUNDAMENTALS,
+        AnalystType.POLICY,
+        AnalystType.HOT_MONEY,
+        AnalystType.LOCKUP,
     ]
+    assert main_cli.ANALYST_REPORT_MAP["social"] == "sentiment_report"
