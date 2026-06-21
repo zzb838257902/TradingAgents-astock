@@ -575,14 +575,7 @@ class LiveFreeAStockSourceBackend:
         )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
-                status = getattr(response, "status", 200)
-                if status == 429:
-                    raise ProviderFetchError("rate_limited", f"HTTP 429 for {url}")
-                if status >= 400:
-                    raise ProviderFetchError("http_error", f"HTTP {status} for {url}")
                 raw = response.read().decode("gbk", errors="replace")
-        except ProviderFetchError:
-            raise
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise ProviderFetchError("rate_limited", f"HTTP 429 for {url}") from exc

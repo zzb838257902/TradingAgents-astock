@@ -151,6 +151,25 @@ def test_free_provider_default_batch_pause_is_positive():
     assert provider._batch_pause > 0
 
 
+def test_free_provider_batch_pause_adds_up_to_half_second_jitter():
+    symbols = [f"{index:06d}" for index in range(100)]
+
+    class _ManySymbolBackend(_IndicatorBackend):
+        def list_mootdx_stocks(self) -> list[dict]:
+            return [{"symbol": symbol} for symbol in symbols]
+
+    sleeps: list[float] = []
+    provider = FreeAStockProvider(
+        _ManySymbolBackend(),
+        batch_size=80,
+        batch_pause=0.3,
+        sleeper=sleeps.append,
+        random_fn=lambda _low, high: high,
+    )
+    provider.get_daily_indicators(shanghai_today())
+    assert sleeps == [0.8]
+
+
 def test_free_provider_http_error():
     class _HttpBackend(_IndicatorBackend):
         def fetch_tencent_daily_indicators(self, symbols: list[str]) -> list[dict[str, object]]:

@@ -56,6 +56,7 @@ _EVENT_PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
 
 _DEFAULT_INDICATOR_BATCH_SIZE = 80
 _DEFAULT_INDICATOR_BATCH_PAUSE = 0.3
+_DEFAULT_INDICATOR_BATCH_JITTER = 0.5
 _FETCH_ERROR_TO_STATUS = {
     "network_error": DataStatus.NETWORK_ERROR,
     "http_error": DataStatus.HTTP_ERROR,
@@ -385,7 +386,7 @@ class FreeAStockProvider:
         import time
 
         sleeper = self._sleeper or time.sleep
-        jitter = (self._random_fn or random.uniform)(0.0, 0.1)
+        jitter = (self._random_fn or random.uniform)(0.0, _DEFAULT_INDICATOR_BATCH_JITTER)
         sleeper(self._batch_pause + jitter)
 
     def _fetch_tencent_indicators_with_retry(
