@@ -1,21 +1,11 @@
 # 现有功能缺陷修复 — 中期验收 B（复审）
 
 > 日期：2026-06-21  
-> 状态：**待复审** — 已修复首轮验收 B 阻塞项
-
-## 首轮阻塞项与修复
-
-| 级别 | 问题 | 修复 |
-|------|------|------|
-| P0 | 交易日历已到信号日，但信号日行情缺失时仍用上一日 K 线完成选股（假绿 `status=ok`） | `pipeline.py` 增加 `_signal_day_bar` 门禁；目标宇宙任一标的缺信号日已发布行情 → `data_error`；移除 `history[-1]` 静默回退 |
-| P0 连带 | 调度 `run_after_close` 对历史 `trade_date` 使用 `max(..., now)` 导致信号日漂移到今天 | `jobs.py` 仅在 `trade_date == shanghai_today()` 时才与 `now` 取 max |
-| P1 | 运行中自动保存仍写 `policy_report.md`，与 Registry 的 `policy.md` 双轨 | `report_section_output_filename()` 统一流式保存文件名 |
-| 缺口 | Task 4 缺指数成分股测试 | `test_repository_screen_index` |
-| 缺口 | 缺信号日行情缺失回归测试 | `test_missing_signal_day_quotes_returns_data_error` |
+> 状态：**已通过复审** — 阻塞项已修复并提交 `2d36cef0`
 
 ## 专项 Commit 清单
 
-自 Task 0 基线 `08af6011` 起（含 Task 0 共 **7** 个 commit；`08af6011..HEAD` 范围为 **6** 个后续 commit）：
+自 Task 0 基线 `08af6011` 起，专项共 **8** 个 commit（`08af6011..HEAD` 范围为 **7** 个后续 commit）：
 
 | Commit | 说明 |
 |--------|------|
@@ -26,8 +16,7 @@
 | `04c3e8a9` | 中期验收 A 修复 |
 | `588dd8ed` | Task 4：真实库选股 CLI |
 | `7a307de2` | Task 5：七分析师 Registry |
-
-复审修复待提交：`fix(remediation): address acceptance B blockers`
+| `2d36cef0` | 中期验收 B 修复（信号日门禁、报告文件名、指数/缺失测试） |
 
 ## 全量回归
 
@@ -80,4 +69,14 @@ PYTHONPATH='.pip_packages:.' python3 -m tradingagents.screener.cli screen \
 # 期望：status=data_error, errors 含 missing published quotes for signal date
 ```
 
-**请复审中期验收 B；通过后继续 Task 6。**
+**中期验收 B 已通过；继续 Task 6。**
+
+## 首轮阻塞项与修复（`2d36cef0`）
+
+| 级别 | 问题 | 修复 |
+|------|------|------|
+| P0 | 交易日历已到信号日，但信号日行情缺失时仍用上一日 K 线完成选股（假绿 `status=ok`） | `pipeline.py` 增加 `_signal_day_bar` 门禁；目标宇宙任一标的缺信号日已发布行情 → `data_error`；移除 `history[-1]` 静默回退 |
+| P0 连带 | 调度 `run_after_close` 对历史 `trade_date` 使用 `max(..., now)` 导致信号日漂移到今天 | `jobs.py` 仅在 `trade_date == shanghai_today()` 时才与 `now` 取 max |
+| P1 | 运行中自动保存仍写 `policy_report.md`，与 Registry 的 `policy.md` 双轨 | `report_section_output_filename()` 统一流式保存文件名 |
+| 缺口 | Task 4 缺指数成分股测试 | `test_repository_screen_index` |
+| 缺口 | 缺信号日行情缺失回归测试 | `test_missing_signal_day_quotes_returns_data_error` |
