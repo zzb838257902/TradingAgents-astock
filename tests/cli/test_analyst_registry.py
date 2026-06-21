@@ -10,6 +10,7 @@ from cli.analyst_registry import (
     ANALYST_OUTPUT_FILENAMES,
     ANALYST_REPORT_MAP,
     ANALYST_SPECS,
+    ANALYST_TEAM_AGENT_NAMES,
     ORIGINAL_FOUR_ANALYST_KEYS,
     analyst_report_sections,
     normalize_selected_analyst_keys,
@@ -88,3 +89,18 @@ def test_report_section_output_filename_uses_registry_names():
     assert report_section_output_filename("policy_report") == "policy.md"
     assert report_section_output_filename("hot_money_report") == "hot_money.md"
     assert report_section_output_filename("investment_plan") == "investment_plan.md"
+
+
+def test_analyst_team_agent_names_lists_all_seven_graph_nodes():
+    assert len(ANALYST_TEAM_AGENT_NAMES) == 7
+    assert "Policy Analyst" in ANALYST_TEAM_AGENT_NAMES
+    assert "Hot_money Analyst" in ANALYST_TEAM_AGENT_NAMES
+    assert "Lockup Analyst" in ANALYST_TEAM_AGENT_NAMES
+    assert list(ANALYST_AGENT_NAMES.values()) == list(ANALYST_TEAM_AGENT_NAMES)
+
+
+def test_message_buffer_unknown_section_title_falls_back_to_key():
+    buffer = main_cli.MessageBuffer()
+    buffer.report_sections["plugin_section"] = "plugin content"
+    buffer._update_current_report()
+    assert buffer.current_report == "### plugin_section\nplugin content"

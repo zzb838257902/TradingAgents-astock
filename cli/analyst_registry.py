@@ -55,6 +55,8 @@ ANALYST_SPECS: tuple[AnalystSpec, ...] = (
     ),
     AnalystSpec(
         "hot_money",
+        # Must match tradingagents/graph/setup.py: analyst_type.capitalize() + " Analyst".
+        # Do not switch to title(); "hot_money".title() -> "Hot_Money Analyst" breaks the graph.
         "Hot_money Analyst",
         "hot_money_report",
         "Hot Money / Capital Flow",
@@ -73,6 +75,9 @@ ANALYST_ORDER: list[str] = [spec.key for spec in ANALYST_SPECS]
 ANALYST_AGENT_NAMES: dict[str, str] = {
     spec.key: spec.graph_node_name for spec in ANALYST_SPECS
 }
+ANALYST_TEAM_AGENT_NAMES: tuple[str, ...] = tuple(
+    spec.graph_node_name for spec in ANALYST_SPECS
+)
 ANALYST_REPORT_MAP: dict[str, str] = {
     spec.key: spec.report_key for spec in ANALYST_SPECS
 }

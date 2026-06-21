@@ -33,6 +33,7 @@ from cli.analyst_registry import (
     ANALYST_REPORT_MAP,
     ANALYST_SECTION_TITLES,
     ANALYST_SPECS,
+    ANALYST_TEAM_AGENT_NAMES,
     FIXED_SECTION_TITLES,
     all_report_sections,
     collect_analyst_report_parts,
@@ -167,7 +168,7 @@ class MessageBuffer:
                 **FIXED_SECTION_TITLES,
             }
             self.current_report = (
-                f"### {section_titles[latest_section]}\n{latest_content}"
+                f"### {section_titles.get(latest_section, latest_section)}\n{latest_content}"
             )
 
         # Update the final complete report
@@ -258,12 +259,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
 
     # Group agents by team - filter to only include agents in agent_status
     all_teams = {
-        "Analyst Team": [
-            "Market Analyst",
-            "Social Analyst",
-            "News Analyst",
-            "Fundamentals Analyst",
-        ],
+        "Analyst Team": list(ANALYST_TEAM_AGENT_NAMES),
         "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
         "Trading Team": ["Trader"],
         "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
