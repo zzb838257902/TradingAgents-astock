@@ -19,7 +19,7 @@ def bar_history_trading_dates(
     trade_date: date,
     config: ScreenerConfig,
 ) -> list[date]:
-    count = max(30, config.universe.min_listing_days + 1, 20)
+    count = max(61, config.universe.min_listing_days + 1, 20)
     open_dates = [day for day in repo.list_open_trade_dates() if day <= trade_date]
     if not open_dates:
         return []
@@ -35,7 +35,10 @@ def resolve_signal_trade_date(
     reference_today = today or shanghai_today()
     open_dates = repo.list_open_trade_dates()
     if not open_dates:
-        return None, None, ["repository has no trade calendar data"]
+        return None, None, [
+            "repository has no trade calendar data; "
+            "run: tradingagents-market-data sync trade-calendar",
+        ]
 
     if as_of:
         signal_time = ensure_aware_shanghai(datetime.fromisoformat(as_of))
@@ -54,7 +57,8 @@ def resolve_signal_trade_date(
     eligible = [day for day in open_dates if day <= reference_today]
     if not eligible:
         return None, None, [
-            f"no open trade date on or before {reference_today.isoformat()}",
+            f"no open trade date on or before {reference_today.isoformat()}; "
+            "sync trade-calendar or pass --as-of with an earlier open date",
         ]
     trade_date = eligible[-1]
     return trade_date, post_close_signal_time(trade_date), []
@@ -178,6 +182,35 @@ def build_fixture_from_repository(
         signal_time,
     )
     financial_rows = repo.get_financials(symbols, available_before=signal_time)
+    signal_trade_dates = [
+        trade_date
+        for trade_date in trading_dates
+        if post_close_signal_time(trade_date) <= signal_time
+    ]
+    indicator_trade_date = signal_trade_dates[-1] if signal_trade_dates else trading_dates[-1]
+    indicator_rows = repo.get_daily_indicators(
+        symbols,
+        indicator_trade_date,
+        signal_time,
+    )
+    daily_indicators = [
+        {
+            "symbol": row["symbol"],
+            "trade_date": row["trade_date"].isoformat()
+            if hasattr(row["trade_date"], "isoformat")
+            else row["trade_date"],
+            "pe_ttm": row.get("pe_ttm"),
+            "pb": row.get("pb"),
+            "turnover_pct": row.get("turnover_pct"),
+            "total_market_cap_cny": row.get("total_market_cap_cny"),
+            "float_market_cap_cny": row.get("float_market_cap_cny"),
+            "available_at": row["available_at"].isoformat()
+            if hasattr(row["available_at"], "isoformat")
+            else row["available_at"],
+            "source": row.get("source"),
+        }
+        for row in indicator_rows
+    ]
     financials = [
         {
             "symbol": row["symbol"],
@@ -197,7 +230,11 @@ def build_fixture_from_repository(
     ]
     return {
         "version": 1,
-        "datasets": {"daily_bars": "pit_required", "financials": "pit_required"},
+        "datasets": {
+            "daily_bars": "pit_required",
+            "financials": "pit_required",
+            "daily_indicators": "best_effort",
+        },
         "symbols": [
             {
                 "symbol": record.symbol,
@@ -209,4 +246,5 @@ def build_fixture_from_repository(
         ],
         "bars": bars,
         "financials": financials,
+        "daily_indicators": daily_indicators,
     }

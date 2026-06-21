@@ -36,3 +36,25 @@ def test_momentum_cross_section_assigns_distinct_scores():
     assert scores.nunique() == 3
     assert scores["C"] > scores["B"] > scores["A"]
 
+
+def test_blended_momentum_reweights_available_lookbacks():
+    closes = pd.Series(
+        [10.0, 10.5, 11.0, 11.5, 12.0],
+        index=pd.date_range("2026-01-01", periods=5),
+    )
+    from tradingagents.screener.factors import compute_blended_momentum
+
+    assert compute_blended_momentum(closes, "2026-01-05") == compute_momentum(
+        closes,
+        "2026-01-05",
+        lookback=2,
+    )
+
+
+def test_valuation_prefers_lower_positive_multiples():
+    from tradingagents.screener.factors import compute_valuation
+
+    cheap = compute_valuation(pe_ttm=10.0, pb=1.0, turnover_pct=1.0)
+    rich = compute_valuation(pe_ttm=40.0, pb=4.0, turnover_pct=1.0)
+    assert cheap > rich
+

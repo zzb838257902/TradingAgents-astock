@@ -29,3 +29,5 @@ def test_build_fixture_from_repository(tmp_path):
     )
     assert "2026-01-02" in built["bars"]
     assert "600001" in built["bars"]["2026-01-02"]
+    assert "daily_indicators" in built
+    assert built["datasets"]["daily_indicators"] == "best_effort"

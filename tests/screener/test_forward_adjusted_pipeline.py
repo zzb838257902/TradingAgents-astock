@@ -32,7 +32,8 @@ def test_forward_adjusted_momentum_ignores_dividend_gap(base_fixture, tmp_path):
 
     for day in trading_dates:
         fixture["bars"][day][symbol]["close"] = 10.0
-    ex_date = trading_dates[-3]
+    signal_date = trading_dates[-2]
+    ex_date = signal_date
     fixture["bars"][ex_date][symbol]["close"] = 5.0
     fixture["adjustment_factors"] = [{
         "symbol": symbol,

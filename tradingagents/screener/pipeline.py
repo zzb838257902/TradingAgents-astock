@@ -23,7 +23,12 @@ from tradingagents.market_data.pit import require_pit_required
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.event_enrichment import enrich_ranking_with_events
-from tradingagents.screener.factors import compute_momentum, compute_quality, rank_score
+from tradingagents.screener.factors import (
+    compute_blended_momentum,
+    compute_quality,
+    compute_valuation,
+    rank_score,
+)
 from tradingagents.screener.models import CandidateInput
 from tradingagents.screener.models import PortfolioSuggestion
 from tradingagents.screener.portfolio import construct_portfolio
@@ -112,7 +117,13 @@ def _symbols_missing_signal_day_quotes(
 
 
 def _collect_dataset_versions(repo: MarketDataRepository) -> dict[str, dict | None]:
-    datasets = ("security_master", "daily_bars", "trade_calendar", "financials")
+    datasets = (
+        "security_master",
+        "daily_bars",
+        "trade_calendar",
+        "financials",
+        "daily_indicators",
+    )
     return {name: repo.get_latest_published_version(name) for name in datasets}
 
 
@@ -436,12 +447,24 @@ def run_screen(
 
     raw_momentum: dict[str, float] = {}
     raw_quality: dict[str, float] = {}
+    raw_valuation: dict[str, float] = {}
+    factor_excluded: dict[str, list[str]] = {}
     rows = []
     industry_by_symbol: dict[str, str] = {}
+    included_symbols_list = [item.symbol for item in universe.included]
+    indicators_by_symbol = {
+        row["symbol"]: row
+        for row in repo.get_daily_indicators(
+            included_symbols_list,
+            signal_date,
+            signal_time,
+        )
+    }
     for item in universe.included:
         symbol = item.symbol
         history = sorted(daily_by_symbol[symbol], key=lambda row: _parse_trade_date(row["trade_date"]))
         if len(history) < 3:
+            factor_excluded[symbol] = ["insufficient_bar_history"]
             continue
         trade_dates = [_parse_trade_date(row["trade_date"]) for row in history]
         if config.strategy.price_basis == PriceBasis.FORWARD_ADJUSTED:
@@ -458,12 +481,23 @@ def run_screen(
             index=pd.to_datetime([day.isoformat() for day in trade_dates]),
         )
         signal_key = signal_date.isoformat()
-        raw_momentum[symbol] = compute_momentum(close_series, signal_key, lookback=2)
+        try:
+            raw_momentum[symbol] = compute_blended_momentum(close_series, signal_key)
+        except ValueError:
+            factor_excluded[symbol] = ["insufficient_bar_history"]
+            continue
         fin = fin_by_symbol.get(symbol)
         raw_quality[symbol] = (
             compute_quality(fin["roe"], fin["operating_cashflow"], fin["net_profit"], fin["debt_ratio"])
             if fin else 0.0
         )
+        indicator = indicators_by_symbol.get(symbol)
+        if indicator is not None:
+            raw_valuation[symbol] = compute_valuation(
+                indicator.get("pe_ttm"),
+                indicator.get("pb"),
+                indicator.get("turnover_pct"),
+            )
         last_bar = history[-1]
         industry_by_symbol[symbol] = item.industry
         rows.append({
@@ -472,6 +506,8 @@ def run_screen(
             "price": last_bar["close"],
             "avg_volume": last_bar["volume"],
         })
+
+    merged_excluded = {**universe.excluded_reasons, **factor_excluded}
 
     if not rows:
         return _base_report(
@@ -482,17 +518,24 @@ def run_screen(
             pit_level=pit_level,
             dataset_versions=dataset_versions,
             data_sources=data_sources,
-            excluded_reasons=universe.excluded_reasons,
+            excluded_reasons=merged_excluded,
             status=ScreeningStatus.EMPTY_UNIVERSE,
             data_quality=data_quality,
         )
 
     momentum_scores = rank_score(pd.Series(raw_momentum))
     quality_scores = rank_score(pd.Series(raw_quality))
+    combined_quality = quality_scores.copy()
+    if raw_valuation:
+        valuation_scores = rank_score(pd.Series(raw_valuation))
+        for symbol in valuation_scores.index:
+            combined_quality[symbol] = (
+                quality_scores[symbol] + valuation_scores[symbol]
+            ) / 2
 
     frame = pd.DataFrame(rows)
     frame["momentum"] = frame["symbol"].map(momentum_scores)
-    frame["quality"] = frame["symbol"].map(quality_scores)
+    frame["quality"] = frame["symbol"].map(combined_quality)
 
     scored = score_candidates(
         frame,
@@ -532,8 +575,8 @@ def run_screen(
                 universe_code=request.universe_code,
                 universe_size=universe_size,
                 included_count=len(universe.included),
-                excluded_count=len(universe.excluded_reasons),
-                excluded_reasons=universe.excluded_reasons,
+                excluded_count=len(merged_excluded),
+                excluded_reasons=merged_excluded,
                 ranking=base_ranking,
                 errors=enrichment.event_enrichment_errors,
                 **enrichment_kwargs,
@@ -610,7 +653,7 @@ def run_screen(
     factor_contributions = {
         symbol: {
             "momentum": float(momentum_scores.get(symbol, 0.0)),
-            "quality": float(quality_scores.get(symbol, 0.0)),
+            "quality": float(combined_quality.get(symbol, 0.0)),
         }
         for symbol in ranking
     }
@@ -629,8 +672,8 @@ def run_screen(
         universe_code=request.universe_code,
         universe_size=universe_size,
         included_count=len(universe.included),
-        excluded_count=len(universe.excluded_reasons),
-        excluded_reasons=universe.excluded_reasons,
+        excluded_count=len(merged_excluded),
+        excluded_reasons=merged_excluded,
         ranking=ranking,
         factor_contributions=factor_contributions,
         target_weights=rounded_weights,
