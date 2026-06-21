@@ -14,12 +14,15 @@ from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
     CoverageReport,
     assess_daily_bar_quality,
+    assess_daily_indicator_quality,
     build_backfill_completeness_report,
     build_daily_completeness_report,
+    build_daily_indicator_completeness_report,
     build_financial_field_quality_report,
     build_financial_symbol_coverage_report,
     build_security_coverage_report,
     build_trade_calendar_range_report,
+    DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
 )
 from tradingagents.market_data.financials import normalize_financial_row
 from tradingagents.market_data.repository import MarketDataRepository
@@ -366,6 +369,120 @@ class MarketDataSync:
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
             coverage_reports={"daily_completeness": coverage},
+        )
+
+    def sync_daily_indicators(self, trade_date: date) -> SyncResult:
+        fetched = self.provider.get_daily_indicators(trade_date)
+        if fetched.status == DataStatus.NOT_AVAILABLE_YET:
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=fetched.errors or [fetched.status.value],
+            )
+        if fetched.status not in {DataStatus.OK, DataStatus.SUCCESS_EMPTY}:
+            return self._error_result("daily_indicators", fetched)
+
+        run_time = datetime.now(tz=SHANGHAI)
+        if fetched.status == DataStatus.SUCCESS_EMPTY and not (fetched.data or []):
+            run_id = self.repository.begin_ingestion_run(
+                "daily_indicators",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "success_empty": True,
+                },
+            )
+            self._save_snapshot(
+                "daily_indicators",
+                {"trade_date": trade_date.isoformat()},
+                {"rows": [], "success_empty": True},
+            )
+            try:
+                version_id = self.repository.publish_dataset_version(run_id)
+            except ValueError as exc:
+                self.repository.mark_ingestion_failed(run_id, str(exc))
+                return SyncResult(
+                    dataset="daily_indicators",
+                    status=SyncStatus.ERROR,
+                    run_id=run_id,
+                    errors=[str(exc)],
+                )
+            published = self.repository.get_latest_published_version("daily_indicators")
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.PUBLISHED,
+                run_id=run_id,
+                version_id=version_id,
+                content_hash=published["content_hash"] if published else None,
+            )
+
+        rows = fetched.data or []
+        for row in rows:
+            row.setdefault("ingested_at", run_time)
+        issues = assess_daily_indicator_quality(rows, trade_date)
+        if issues:
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+
+        expected = self.repository.count_tradable_securities(
+            trade_date,
+            post_close_signal_time(trade_date),
+        )
+        coverage = build_daily_indicator_completeness_report(
+            numerator=len({row["symbol"] for row in rows}),
+            denominator=expected,
+            threshold=DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "daily indicator coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"daily_indicator_completeness": coverage},
+            )
+
+        run_id = self.repository.begin_ingestion_run(
+            "daily_indicators",
+            {"trade_date": trade_date.isoformat()},
+        )
+        self.repository.upsert_staging_daily_indicators(run_id, rows)
+        self._save_snapshot(
+            "daily_indicators",
+            {"trade_date": trade_date.isoformat()},
+            rows,
+        )
+        try:
+            version_id = self.repository.publish_dataset_version(run_id)
+        except ValueError as exc:
+            self.repository.mark_ingestion_failed(run_id, str(exc))
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.ERROR,
+                run_id=run_id,
+                errors=[str(exc)],
+            )
+        published = self.repository.get_latest_published_version("daily_indicators")
+        self.repository.record_quality_event(
+            dataset="daily_indicators",
+            rule="daily_indicator_completeness",
+            severity="info",
+            version_id=version_id,
+            numerator=coverage.numerator,
+            denominator=coverage.denominator,
+            detail_json=coverage.to_dict(),
+        )
+        return SyncResult(
+            dataset="daily_indicators",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"daily_indicator_completeness": coverage},
         )
 
     def sync_daily_backfill(

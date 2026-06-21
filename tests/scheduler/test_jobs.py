@@ -155,3 +155,52 @@ def test_after_close_skips_live_sync_for_historical_signal_date(tmp_path, monkey
     assert result.sync_steps["security_master"] == "skipped_historical_signal"
     assert result.sync_steps["daily_bars"] == "skipped_historical_signal"
     assert result.sync_steps["financials"] == "skipped_historical_signal"
+
+
+def test_after_close_degrades_when_daily_indicators_fail(tmp_path, monkeypatch):
+    from tradingagents.market_data.sync import SyncResult, SyncStatus
+    from tradingagents.screener.report import RunReport, ScreeningStatus
+
+    sync, config, paths, fixture = _setup(tmp_path)
+    trade_date = date(2026, 1, 2)
+    signal_time = post_close_signal_time(trade_date)
+    monkeypatch.setattr(
+        "tradingagents.scheduler.jobs.shanghai_today",
+        lambda: trade_date,
+    )
+    monkeypatch.setattr(
+        "tradingagents.scheduler.jobs.run_screen",
+        lambda *_args, **_kwargs: RunReport(
+            run_id="test-run",
+            status=ScreeningStatus.OK,
+            signal_time=signal_time,
+            data_as_of=signal_time,
+        ),
+    )
+    sync.probe_capabilities = lambda: SyncResult(  # type: ignore[method-assign]
+        dataset="capability_probe",
+        status=SyncStatus.PUBLISHED,
+    )
+    sync.sync_security_master = lambda *_args, **_kwargs: SyncResult(  # type: ignore[method-assign]
+        dataset="security_master",
+        status=SyncStatus.PUBLISHED,
+    )
+    sync.sync_daily = lambda *_args, **_kwargs: SyncResult(  # type: ignore[method-assign]
+        dataset="daily_bars",
+        status=SyncStatus.PUBLISHED,
+    )
+    sync.sync_daily_indicators = lambda *_args, **_kwargs: SyncResult(  # type: ignore[method-assign]
+        dataset="daily_indicators",
+        status=SyncStatus.ERROR,
+        errors=["network down"],
+    )
+    sync.sync_financials = lambda *_args, **_kwargs: SyncResult(  # type: ignore[method-assign]
+        dataset="financials",
+        status=SyncStatus.PUBLISHED,
+    )
+
+    result = run_after_close(trade_date, config, paths, sync, force=True)
+    assert result.status == "success"
+    assert result.sync_steps["daily_bars"] == "published"
+    assert result.sync_steps["daily_indicators"] == "error"
+    assert "network down" in result.sync_steps["daily_indicators_degraded"]

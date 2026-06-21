@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
 from tradingagents.market_data.financials import next_open_trading_day
+
+MAX_DAILY_INDICATOR_MARKET_CAP_CNY = 100_000_000_000_000
+DAILY_INDICATOR_COMPLETENESS_THRESHOLD = 0.80
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,121 @@ def assess_daily_bar_quality(bars: list[dict]) -> list[QualityIssue]:
                 trade_date=trade_date,
             ))
     return issues
+
+
+def assess_daily_indicator_quality(
+    rows: list[dict],
+    trade_date: date,
+) -> list[QualityIssue]:
+    issues: list[QualityIssue] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        symbol = str(row.get("symbol", "")).strip()
+        row_trade_date = row.get("trade_date")
+        source = str(row.get("source", "")).strip()
+        if row_trade_date != trade_date:
+            issues.append(QualityIssue(
+                rule="trade_date_mismatch",
+                severity="blocking",
+                detail=f"expected {trade_date.isoformat()}, got {row_trade_date}",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+        key = (symbol, str(row_trade_date), source)
+        if key in seen:
+            issues.append(QualityIssue(
+                rule="duplicate_primary_key",
+                severity="blocking",
+                detail=f"duplicate daily indicator key for {symbol}",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+        seen.add(key)
+        available_at = row.get("available_at")
+        if available_at is None:
+            issues.append(QualityIssue(
+                rule="missing_available_at",
+                severity="blocking",
+                detail="daily indicator missing available_at",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+        for field_name in ("total_market_cap_cny", "float_market_cap_cny"):
+            value = row.get(field_name)
+            if value is None or not math.isfinite(float(value)):
+                issues.append(QualityIssue(
+                    rule="non_finite_market_cap",
+                    severity="blocking",
+                    detail=f"{field_name} must be finite",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+                continue
+            number = float(value)
+            if number < 0:
+                issues.append(QualityIssue(
+                    rule="negative_market_cap",
+                    severity="blocking",
+                    detail=f"{field_name} must be non-negative",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+            elif number > MAX_DAILY_INDICATOR_MARKET_CAP_CNY:
+                issues.append(QualityIssue(
+                    rule="market_cap_above_limit",
+                    severity="blocking",
+                    detail=f"{field_name} exceeds unit ceiling",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+        turnover = row.get("turnover_pct")
+        if turnover is not None:
+            if not math.isfinite(float(turnover)):
+                issues.append(QualityIssue(
+                    rule="non_finite_turnover",
+                    severity="blocking",
+                    detail="turnover_pct must be finite",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+            elif float(turnover) < 0:
+                issues.append(QualityIssue(
+                    rule="negative_turnover",
+                    severity="blocking",
+                    detail="turnover_pct must be non-negative",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+        for field_name in ("pe_ttm", "pb"):
+            value = row.get(field_name)
+            if value is None:
+                continue
+            if not math.isfinite(float(value)):
+                issues.append(QualityIssue(
+                    rule="non_finite_ratio",
+                    severity="blocking",
+                    detail=f"{field_name} must be finite when present",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+    return issues
+
+
+def build_daily_indicator_completeness_report(
+    numerator: int,
+    denominator: int,
+    *,
+    threshold: float = DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+) -> CoverageReport:
+    ratio = numerator / denominator if denominator else 0.0
+    return CoverageReport(
+        dataset="daily_indicators",
+        status="pass" if ratio >= threshold else "fail",
+        numerator=numerator,
+        denominator=denominator,
+        ratio=ratio,
+        threshold=threshold,
+    )
 
 
 def build_daily_completeness_report(

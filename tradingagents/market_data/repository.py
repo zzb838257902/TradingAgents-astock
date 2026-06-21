@@ -14,7 +14,13 @@ import duckdb
 from tradingagents.events.contracts import EventSymbolLink, MarketEvent, stable_event_id
 from tradingagents.market_data.contracts import PITLevel, SecurityRecord
 from tradingagents.market_data.financials import normalize_financial_row, pick_latest_visible_financials
+from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.migrations import apply_migrations
+from tradingagents.market_data.quality import (
+    DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+    assess_daily_indicator_quality,
+    build_daily_indicator_completeness_report,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -25,6 +31,10 @@ _SECURITY_COLUMNS = (
 _DAILY_BAR_COLUMNS = (
     "symbol", "trade_date", "open", "high", "low", "close", "volume",
     "amount", "available_at", "source",
+)
+_DAILY_INDICATOR_COLUMNS = (
+    "symbol", "trade_date", "pe_ttm", "pb", "turnover_pct",
+    "total_market_cap_cny", "float_market_cap_cny", "available_at", "source",
 )
 _FINANCIAL_COLUMNS = (
     "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
@@ -346,6 +356,33 @@ class MarketDataRepository:
         rows = self.connection.execute(query, params).fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
+    def get_daily_indicators(
+        self,
+        symbols: list[str],
+        trade_date: date,
+        available_before: datetime,
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        params: list = list(symbols)
+        query = f"""
+            SELECT i.symbol, i.trade_date, i.pe_ttm, i.pb, i.turnover_pct,
+                   i.total_market_cap_cny, i.float_market_cap_cny,
+                   i.available_at, i.source
+            FROM daily_indicators i
+            LEFT JOIN dataset_versions v ON i.dataset_version_id = v.version_id
+            WHERE i.symbol IN ({placeholders})
+              AND i.trade_date = ?
+              AND i.available_at <= ?
+              AND (i.dataset_version_id IS NULL OR v.status = 'PUBLISHED')
+            ORDER BY i.symbol
+        """
+        params.extend([trade_date, available_before])
+        columns = list(_DAILY_INDICATOR_COLUMNS)
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
     def upsert_financials(self, rows: Iterable[dict]) -> None:
         open_dates = self.list_open_trade_dates()
         values = []
@@ -507,6 +544,35 @@ class MarketDataRepository:
                 prev_close, available_at, source, ingested_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
+        )
+
+    def upsert_staging_daily_indicators(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                run_id,
+                row["symbol"],
+                row["trade_date"],
+                row.get("pe_ttm"),
+                row.get("pb"),
+                row.get("turnover_pct"),
+                row["total_market_cap_cny"],
+                row["float_market_cap_cny"],
+                row["available_at"],
+                row["source"],
+                row.get("ingested_at", now),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_daily_indicators
+               (run_id, symbol, trade_date, pe_ttm, pb, turnover_pct,
+                total_market_cap_cny, float_market_cap_cny, available_at, source,
+                ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
         )
 
     def upsert_staging_financials(self, run_id: str, rows: Iterable[dict]) -> None:
@@ -684,6 +750,11 @@ class MarketDataRepository:
             self._copy_staging_corporate_actions(run_id, version_id)
         elif dataset in {"industry_members", "concept_members", "index_members"}:
             self._copy_staging_board_memberships(run_id, version_id)
+        elif dataset == "daily_indicators":
+            errors = self._validate_staging_daily_indicators(run_id)
+            if errors:
+                raise ValueError(f"daily indicator quality gate failed: {'; '.join(errors)}")
+            self._copy_staging_daily_indicators(run_id, version_id)
         else:
             raise ValueError(f"unsupported dataset for publish: {dataset}")
 
@@ -756,6 +827,24 @@ class MarketDataRepository:
                           effective_from, effective_to, snapshot_date, available_at, source
                    FROM staging_board_memberships WHERE run_id = ?
                    ORDER BY board_type, board_code, symbol, effective_from""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "daily_indicators":
+            params_row = self.connection.execute(
+                "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            params = json.loads(params_row[0]) if params_row else {}
+            if params.get("success_empty"):
+                return _hash_payload({
+                    "trade_date": params.get("trade_date"),
+                    "success_empty": True,
+                })
+            rows = self.connection.execute(
+                """SELECT symbol, trade_date, pe_ttm, pb, turnover_pct,
+                          total_market_cap_cny, float_market_cap_cny, available_at, source
+                   FROM staging_daily_indicators WHERE run_id = ?
+                   ORDER BY symbol, trade_date, source""",
                 [run_id],
             ).fetchall()
         else:
@@ -888,8 +977,71 @@ class MarketDataRepository:
             [(*row[:10], version_id) for row in staging_rows],
         )
 
+    def _copy_staging_daily_indicators(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            """SELECT symbol, trade_date, pe_ttm, pb, turnover_pct,
+                      total_market_cap_cny, float_market_cap_cny, available_at, source,
+                      ingested_at
+               FROM staging_daily_indicators WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO daily_indicators
+               (symbol, trade_date, pe_ttm, pb, turnover_pct,
+                total_market_cap_cny, float_market_cap_cny, available_at, source,
+                ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:10], version_id) for row in staging_rows],
+        )
+
+    def _validate_staging_daily_indicators(self, run_id: str) -> list[str]:
+        run = self.connection.execute(
+            "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        if run is None:
+            return [f"unknown ingestion run {run_id}"]
+        params = json.loads(run[0])
+        trade_date = _parse_sync_window_date(params.get("trade_date"))
+        if trade_date is None:
+            return ["missing trade_date in ingestion params"]
+        staging_rows = self.connection.execute(
+            f"""SELECT {', '.join(_DAILY_INDICATOR_COLUMNS)}
+               FROM staging_daily_indicators WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        columns = list(_DAILY_INDICATOR_COLUMNS)
+        rows = [dict(zip(columns, row)) for row in staging_rows]
+        if params.get("success_empty"):
+            if rows:
+                return ["success_empty sync must not contain staging rows"]
+            return []
+        issues = assess_daily_indicator_quality(rows, trade_date)
+        if issues:
+            return [issue.detail for issue in issues]
+        expected = self.count_tradable_securities(
+            trade_date,
+            post_close_signal_time(trade_date),
+        )
+        coverage = build_daily_indicator_completeness_report(
+            numerator=len({row["symbol"] for row in rows}),
+            denominator=expected,
+            threshold=DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            return [
+                "daily indicator coverage below threshold: "
+                f"{coverage.ratio:.4f} < {coverage.threshold}"
+            ]
+        return []
+
     def _clear_staging_for_run(self, run_id: str) -> None:
         self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
+        self.connection.execute(
+            "DELETE FROM staging_daily_indicators WHERE run_id = ?", [run_id]
+        )
         self.connection.execute("DELETE FROM staging_securities WHERE run_id = ?", [run_id])
         self.connection.execute(
             "DELETE FROM staging_trade_calendar WHERE run_id = ?", [run_id]

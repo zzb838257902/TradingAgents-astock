@@ -152,6 +152,22 @@ def run_after_close(
                     errors.extend(daily.errors or ["daily_bars sync failed"])
                     raise RuntimeError("; ".join(errors))
 
+                indicators = sync.sync_daily_indicators(today)
+                sync_steps["daily_indicators"] = indicators.status.value
+                if indicators.status == SyncStatus.PUBLISHED:
+                    pass
+                elif indicators.status == SyncStatus.BLOCKED:
+                    if indicators.errors:
+                        sync_steps["daily_indicators_note"] = "; ".join(indicators.errors)
+                elif indicators.status == SyncStatus.ERROR:
+                    sync_steps["daily_indicators_degraded"] = "; ".join(
+                        indicators.errors or ["daily_indicators sync failed"]
+                    )
+                else:
+                    sync_steps["daily_indicators_degraded"] = "; ".join(
+                        indicators.errors or [indicators.status.value]
+                    )
+
                 financials = sync.sync_financials(signal_time)
                 sync_steps["financials"] = financials.status.value
                 if financials.status != SyncStatus.PUBLISHED:

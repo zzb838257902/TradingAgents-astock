@@ -98,6 +98,9 @@ def sync_dataset(
         else:
             trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
             result = sync.sync_daily(trade_date)
+    elif dataset in {"daily-indicators", "daily_indicators"}:
+        trade_date = date.fromisoformat(start or as_of or date.today().isoformat())
+        result = sync.sync_daily_indicators(trade_date)
     elif dataset == "memberships":
         if not as_of or not board_type or not board_code:
             raise typer.BadParameter(
@@ -172,6 +175,7 @@ def sync_status(
         "security_master": repo.get_latest_published_version("security_master"),
         "trade_calendar": repo.get_latest_published_version("trade_calendar"),
         "daily_bars": repo.get_latest_published_version("daily_bars"),
+        "daily_indicators": repo.get_latest_published_version("daily_indicators"),
         "capability_probe": repo.get_capability_probe(),
     }, ensure_ascii=False, default=str))
 
