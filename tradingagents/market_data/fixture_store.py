@@ -178,26 +178,37 @@ def _load_adjustment_factors_from_fixture(repo: MarketDataRepository, fixture: d
 
 def _seed_fixture_trade_calendar(repo: MarketDataRepository, fixture: dict) -> None:
     trading_dates = sorted(date.fromisoformat(key) for key in fixture["bars"])
-    if not trading_dates:
+    rows_by_date: dict[date, dict] = {}
+    if trading_dates:
+        end = trading_dates[-1]
+        earliest_list = min(
+            date.fromisoformat(item["list_date"]) if item.get("list_date") else trading_dates[0]
+            for item in fixture["symbols"]
+        )
+        start = min(earliest_list, trading_dates[0]) - timedelta(days=400)
+        cursor = start
+        while cursor <= end:
+            if cursor.weekday() < 5:
+                rows_by_date[cursor] = {
+                    "exchange": "SSE",
+                    "trade_date": cursor,
+                    "is_open": True,
+                    "available_at": datetime.combine(cursor, time(9, 0), tzinfo=SHANGHAI),
+                    "source": "fixture",
+                }
+            cursor += timedelta(days=1)
+    for item in fixture.get("trade_calendar", []):
+        trade_date = date.fromisoformat(item["trade_date"])
+        rows_by_date[trade_date] = {
+            "exchange": item.get("exchange", "SSE"),
+            "trade_date": trade_date,
+            "is_open": bool(item.get("is_open", True)),
+            "available_at": datetime.combine(trade_date, time(9, 0), tzinfo=SHANGHAI),
+            "source": "fixture",
+        }
+    rows = [rows_by_date[key] for key in sorted(rows_by_date)]
+    if not rows:
         return
-    end = trading_dates[-1]
-    earliest_list = min(
-        date.fromisoformat(item["list_date"]) if item.get("list_date") else trading_dates[0]
-        for item in fixture["symbols"]
-    )
-    start = min(earliest_list, trading_dates[0]) - timedelta(days=400)
-    rows = []
-    cursor = start
-    while cursor <= end:
-        if cursor.weekday() < 5:
-            rows.append({
-                "exchange": "SSE",
-                "trade_date": cursor,
-                "is_open": True,
-                "available_at": datetime.combine(cursor, time(9, 0), tzinfo=SHANGHAI),
-                "source": "fixture",
-            })
-        cursor += timedelta(days=1)
     run_id = repo.begin_ingestion_run("trade_calendar", {"fixture": True})
     repo.upsert_staging_trade_calendar(run_id, rows)
     repo.publish_dataset_version(run_id)

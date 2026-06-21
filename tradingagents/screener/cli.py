@@ -15,8 +15,9 @@ from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.market_hours import post_close_signal_time
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
+from tradingagents.screener.live import resolve_signal_trade_date, run_repository_screen
 from tradingagents.screener.pipeline import run_fixture_backtest, run_screen
-from tradingagents.screener.report import ScreeningStatus
+from tradingagents.screener.report import RunReport, ScreeningStatus
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
 
 app = typer.Typer(help="TradingAgents automatic stock screening MVP")
@@ -83,9 +84,27 @@ def _emit_report(report, extra: dict | None = None) -> None:
         raise typer.Exit(code=1)
 
 
+def _build_universe_request(
+    *,
+    universe: str,
+    universe_code: Optional[str],
+    symbols: Optional[str],
+    signal_time: datetime,
+) -> UniverseRequest:
+    custom_symbols = tuple(
+        item.strip() for item in (symbols or "").split(",") if item.strip()
+    )
+    return UniverseRequest(
+        universe_type=UniverseType(universe),
+        universe_code=universe_code,
+        symbols=custom_symbols,
+        as_of=signal_time,
+    )
+
+
 @app.command("screen")
 def screen(
-    fixture: Path = typer.Option(..., "--fixture"),
+    fixture: Optional[Path] = typer.Option(None, "--fixture"),
     universe: str = typer.Option("all", "--universe"),
     universe_code: Optional[str] = typer.Option(None, "--universe-code"),
     symbols: Optional[str] = typer.Option(None, "--symbols"),
@@ -98,7 +117,7 @@ def screen(
         help="override event_enrichment.enabled in config",
     ),
 ) -> None:
-    """Screen a fixture universe (all/industry/index/custom) and print JSON."""
+    """Screen a fixture or live repository universe and print JSON."""
     config = (
         ScreenerConfig.from_yaml(config_path)
         if config_path
@@ -110,32 +129,72 @@ def screen(
                 update={"enabled": event_enrichment},
             ),
         })
-    fixture_data = _load_fixture(fixture)
-    trading_dates = sorted(fixture_data["bars"])
-    signal_date = date.fromisoformat(trading_dates[-2])
-    signal_time = (
-        datetime.fromisoformat(as_of).astimezone()
-        if as_of
-        else post_close_signal_time(signal_date)
-    )
-    custom_symbols = tuple(
-        item.strip() for item in (symbols or "").split(",") if item.strip()
-    )
-    universe_request = UniverseRequest(
-        universe_type=UniverseType(universe),
+
+    if fixture is not None:
+        fixture_data = _load_fixture(fixture)
+        trading_dates = sorted(fixture_data["bars"])
+        signal_date = date.fromisoformat(trading_dates[-2])
+        signal_time = (
+            datetime.fromisoformat(as_of).astimezone()
+            if as_of
+            else post_close_signal_time(signal_date)
+        )
+        universe_request = _build_universe_request(
+            universe=universe,
+            universe_code=universe_code,
+            symbols=symbols,
+            signal_time=signal_time,
+        )
+        report = run_screen(
+            fixture_data,
+            config,
+            config.home_dir / "data" / "market.duckdb",
+            universe_request=universe_request,
+        )
+        _emit_report(report, extra={
+            "config_hash": _config_hash(config),
+            "fixture_sha256": _fixture_sha256(fixture),
+        })
+        return
+
+    paths = MarketDataPaths(home_dir=home_dir)
+    repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    trade_date, signal_time, errors = resolve_signal_trade_date(repo, as_of=as_of)
+    if errors or trade_date is None or signal_time is None:
+        placeholder_time = post_close_signal_time(date.today())
+        report = RunReport(
+            run_id="repository-screen",
+            status=ScreeningStatus.DATA_ERROR,
+            signal_time=placeholder_time,
+            data_as_of=placeholder_time,
+            universe_type=universe,
+            universe_code=universe_code,
+            errors=errors or ["unable to resolve signal time"],
+        )
+        _emit_report(report, extra={
+            "config_hash": _config_hash(config),
+            "source": "repository",
+        })
+        return
+
+    universe_request = _build_universe_request(
+        universe=universe,
         universe_code=universe_code,
-        symbols=custom_symbols,
-        as_of=signal_time,
+        symbols=symbols,
+        signal_time=signal_time,
     )
-    report = run_screen(
-        fixture_data,
+    report = run_repository_screen(
+        repo,
         config,
-        config.home_dir / "data" / "market.duckdb",
-        universe_request=universe_request,
+        paths.live_db_path,
+        universe_request,
+        trade_date=trade_date,
+        signal_time=signal_time,
     )
     _emit_report(report, extra={
         "config_hash": _config_hash(config),
-        "fixture_sha256": _fixture_sha256(fixture),
+        "source": "repository",
+        "signal_date": trade_date.isoformat(),
     })
 
 

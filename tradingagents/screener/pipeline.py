@@ -18,7 +18,7 @@ from tradingagents.market_data.adjustments import (
 )
 from tradingagents.market_data.contracts import PITLevel, PriceBasis
 from tradingagents.market_data.fixture_store import load_fixture_into_repository
-from tradingagents.market_data.market_hours import post_close_signal_time
+from tradingagents.market_data.market_hours import ensure_aware_shanghai, post_close_signal_time
 from tradingagents.market_data.pit import require_pit_required
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.screener.config import ScreenerConfig
@@ -210,8 +210,12 @@ def run_screen(
         bars_for_bt[date.fromisoformat(trade_date_str)] = day_bars
 
     trading_dates = sorted(bars_for_bt.keys())
-    signal_date = _resolve_signal_date(trading_dates)
-    signal_time = post_close_signal_time(signal_date)
+    if not reload and universe_request and universe_request.as_of is not None:
+        signal_time = ensure_aware_shanghai(universe_request.as_of)
+        signal_date = signal_time.date()
+    else:
+        signal_date = _resolve_signal_date(trading_dates)
+        signal_time = post_close_signal_time(signal_date)
     portfolio_value = config.portfolio.portfolio_value
     request = universe_request or UniverseRequest(
         universe_type=UniverseType.ALL,
