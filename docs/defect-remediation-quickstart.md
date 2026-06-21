@@ -1,6 +1,7 @@
 # Existing-defects remediation quickstart
 
-专项修复范围：日频估值指标、真实库选股 CLI、七分析师终端报告、Mootdx 受控重连。  
+专项修复范围：日频估值指标、真实库选股 CLI、七分析师终端报告、Mootdx 受控重连。
+
 实施计划：`docs/superpowers/plans/2026-06-21-existing-defects-remediation.md`
 
 ## Install
@@ -43,7 +44,7 @@ MOOTDX_SKIP_BESTIP=1 PYTHONPATH='.pip_packages:.' \
 | Step | 验证内容 |
 |------|----------|
 | `live_tencent_indicators` | 腾讯指标 HTTP（600000） |
-| `live_mootdx_connect` | mootdx `stocks(market=0)`（默认 60s 超时，`MOOTDX_CONNECT_BUDGET_SEC` 控制建连预算） |
+| `live_mootdx_connect` | mootdx `stocks(market=0)`（独立子进程 + `subprocess` 硬超时，默认 60s） |
 | `live_repository_screen` | 真实库选股路径（fixture 种子库，不依赖外网） |
 
 三项 **独立执行**；任一项网络不可达映射为 `network blocked` → 整体 **BLOCKED/exit 2**（非 FAIL）。腾讯失败时仍会探测 mootdx 并跑 repository。

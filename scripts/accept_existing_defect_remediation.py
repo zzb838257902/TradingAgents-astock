@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -483,15 +484,79 @@ def _offline_steps(report: AcceptanceReport, home_dir: Path) -> None:
     report.run_step("offline_mootdx_bounded_retry", mootdx_bounded_retry)
 
 
-def _run_with_timeout(fn: Callable[[], dict[str, Any]], timeout_sec: float) -> dict[str, Any]:
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+def _accept_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{PIP}:{ROOT}"
+    env.setdefault("MOOTDX_SKIP_BESTIP", "1")
+    return env
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(fn)
+
+def run_probe_subprocess(
+    cmd: list[str],
+    *,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    """Run a probe command in a child process with a hard timeout."""
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            env=_accept_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"network blocked: timed out after {timeout_sec}s",
+        ) from exc
+    if completed.returncode == 0:
         try:
-            return future.result(timeout=timeout_sec)
-        except FutureTimeout as exc:
-            raise AssertionError(f"network blocked: timed out after {timeout_sec}s") from exc
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"mootdx probe returned invalid JSON: {completed.stdout!r}",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise AssertionError(f"mootdx probe returned non-object JSON: {payload!r}")
+        return payload
+    message = (completed.stderr or completed.stdout or "probe failed").strip()
+    if "returned empty frame" in message:
+        raise AssertionError(message)
+    if message.startswith("network blocked:"):
+        raise AssertionError(message)
+    raise AssertionError(f"network blocked: {message}")
+
+
+def probe_mootdx_connect_payload() -> dict[str, Any]:
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
+
+    frame = get_mootdx_manager().call(lambda client: client.stocks(market=0))
+    if frame is None or len(frame) < 1:
+        raise AssertionError("mootdx stocks(market=0) returned empty frame")
+    return {"row_count": len(frame)}
+
+
+def _main_probe_mootdx() -> int:
+    try:
+        payload = probe_mootdx_connect_payload()
+    except AssertionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"network blocked: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+def _run_mootdx_connect_subprocess(timeout_sec: float) -> dict[str, Any]:
+    script_path = str(Path(__file__).resolve())
+    return run_probe_subprocess(
+        [sys.executable, script_path, "--probe-mootdx"],
+        timeout_sec=timeout_sec,
+    )
 
 
 def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: bool) -> None:
@@ -514,10 +579,6 @@ def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: 
     from tradingagents.screener.live import resolve_signal_trade_date, run_repository_screen
     from tradingagents.screener.report import ScreeningStatus
     from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
-    from tradingagents.dataflows.mootdx_connection import (
-        get_mootdx_manager,
-        is_mootdx_transport_error,
-    )
 
     backend = LiveFreeAStockSourceBackend()
     mootdx_timeout = float(os.environ.get("MOOTDX_LIVE_SMOKE_TIMEOUT_SEC", "60"))
@@ -543,25 +604,7 @@ def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: 
     report.run_step("live_tencent_indicators", tencent_indicators, required=True)
 
     def mootdx_connect() -> dict[str, Any]:
-        def probe() -> dict[str, Any]:
-            frame = get_mootdx_manager().call(lambda client: client.stocks(market=0))
-            if frame is None or len(frame) < 1:
-                raise AssertionError("mootdx stocks(market=0) returned empty frame")
-            return {"row_count": len(frame)}
-
-        try:
-            return _run_with_timeout(probe, mootdx_timeout)
-        except AssertionError as exc:
-            message = str(exc)
-            if "returned empty frame" in message:
-                raise
-            if message.startswith("network blocked:"):
-                raise
-            raise AssertionError(f"network blocked: {message}") from exc
-        except Exception as exc:
-            if is_mootdx_transport_error(exc) or isinstance(exc, (OSError, TimeoutError)):
-                raise AssertionError(f"network blocked: {exc}") from exc
-            raise AssertionError(f"network blocked: {exc}") from exc
+        return _run_mootdx_connect_subprocess(mootdx_timeout)
 
     report.run_step("live_mootdx_connect", mootdx_connect, required=True)
 
@@ -609,8 +652,18 @@ def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: 
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--probe-mootdx" in argv:
+        return _main_probe_mootdx()
+
     parser = argparse.ArgumentParser(
         description="Accept existing-defects remediation tiers A/B",
+    )
+    parser.add_argument(
+        "--probe-mootdx",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--offline",

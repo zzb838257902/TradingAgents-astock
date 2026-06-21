@@ -30,7 +30,7 @@
 |----|------|------|
 | P1-1 | `call()` 释放锁后 `close()` 可与活跃 I/O 竞态 | `_active_calls` + 延迟 `_clients_to_close`；新增 `test_close_waits_until_active_operation_finishes` |
 | P1-2 | `_build_name_code_map()` 绕过 `MootdxConnectionManager` | 改为 `get_mootdx_manager().call(lambda c: c.stocks(...))` |
-| P1-3 | Tier B 仅腾讯失败算 BLOCKED；mootdx/repository 被跳过 | 三项独立执行；统一 `network blocked` 映射；mootdx 60s 超时 + `MOOTDX_CONNECT_BUDGET_SEC`；离线状态机测试 |
+| P1-3 | Tier B 仅腾讯失败算 BLOCKED；mootdx/repository 被跳过；线程超时不可靠 | 三项独立执行；`--probe-mootdx` **独立子进程** + `subprocess.run(timeout=)` 硬超时；`test_run_probe_subprocess_timeout_is_hard` |
 
 ---
 
@@ -52,7 +52,8 @@
 | `f2591ed0` | Task 6：Mootdx 受控重连 |
 | `0de3c5f6` | Task 7：分层最终验收 |
 | `a8782490` | 最终验收报告（首版） |
-| `fcd6cc4c` | P1 复审修复（mootdx 生命周期、name map、Tier B、文档） |
+| `fcd6cc4c` | P1 复审修复（mootdx 生命周期、name map、Tier B 状态机） |
+| *(本次提交)* | P1-3 子进程硬超时 + 文档行尾空格清理 |
 
 中期验收记录：
 
@@ -105,7 +106,7 @@ MOOTDX_SKIP_BESTIP=1 PYTHONPATH='.pip_packages:.' \
 | Step | 说明 |
 |------|------|
 | `live_tencent_indicators` | 腾讯 HTTP |
-| `live_mootdx_connect` | mootdx TCP（`MOOTDX_LIVE_SMOKE_TIMEOUT_SEC` 默认 60s） |
+| `live_mootdx_connect` | mootdx TCP（`--probe-mootdx` 独立子进程；`MOOTDX_LIVE_SMOKE_TIMEOUT_SEC` 默认 60s，`subprocess` 硬超时） |
 | `live_repository_screen` | 本地 fixture 库选股（不依赖外网） |
 
 **编排规则（P1-3 修复后）：**
