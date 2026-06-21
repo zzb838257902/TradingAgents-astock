@@ -40,6 +40,60 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_BLOCKED = 2
 
+LIVE_SMOKE_STEP_NAMES = (
+    "live_tencent_indicators",
+    "live_mootdx_connect",
+    "live_repository_screen",
+)
+
+
+def live_step_network_blocked(error: str | None) -> bool:
+    return (error or "").lower().startswith("assertionerror: network blocked:")
+
+
+def compute_report_status(
+    steps: list[StepResult],
+    modes: list[str],
+) -> tuple[str, int]:
+    offline_fail = any(
+        not step.ok and step.required and step.name.startswith("offline_")
+        for step in steps
+    )
+    live_steps = [
+        step for step in steps
+        if step.name in LIVE_SMOKE_STEP_NAMES
+    ]
+    live_required = [step for step in live_steps if step.required]
+    live_failures = [step for step in live_required if not step.ok]
+    live_network_blocked = [
+        step for step in live_failures if live_step_network_blocked(step.error)
+    ]
+    live_hard_failures = [
+        step for step in live_failures if not live_step_network_blocked(step.error)
+    ]
+
+    if offline_fail or live_hard_failures:
+        return "FAIL", EXIT_FAIL
+    if "live-smoke" in modes and live_network_blocked:
+        return "BLOCKED", EXIT_BLOCKED
+    if live_failures:
+        return "FAIL", EXIT_FAIL
+    return "PASS", EXIT_PASS
+
+
+def tier_live_smoke_status(steps: list[StepResult], modes: list[str]) -> str:
+    if "live-smoke" not in modes:
+        return "SKIP"
+    live_steps = [step for step in steps if step.name in LIVE_SMOKE_STEP_NAMES]
+    if not live_steps:
+        return "SKIP"
+    status, _ = compute_report_status(steps, modes)
+    if status == "BLOCKED":
+        return "BLOCKED"
+    if any(not step.ok and step.required for step in live_steps):
+        return "FAIL"
+    return "PASS"
+
 
 @dataclass
 class StepResult:
@@ -90,54 +144,24 @@ class AcceptanceReport:
     def to_dict(self) -> dict[str, Any]:
         finished = datetime.now(tz=SHANGHAI)
         duration_ms = (finished - self.started_at).total_seconds() * 1000
-        live_blocked = (
-            "live-smoke" in self.modes
-            and any(
-                step.name == "live_network_probe"
-                and not step.ok
-                and (step.error or "").lower().startswith("assertionerror: network blocked:")
-                for step in self.steps
-            )
-        )
-        offline_fail = any(
-            not step.ok and step.required and step.name.startswith("offline_")
-            for step in self.steps
-        )
-        required_failures = [step for step in self.steps if step.required and not step.ok]
-
-        if offline_fail or (
-            required_failures and not live_blocked
-        ):
-            status = "FAIL"
-            exit_code = EXIT_FAIL
-        elif live_blocked:
-            status = "BLOCKED"
-            exit_code = EXIT_BLOCKED
-        elif required_failures:
-            status = "FAIL"
-            exit_code = EXIT_FAIL
-        else:
-            status = "PASS"
-            exit_code = EXIT_PASS
-
-        def _tier_status(mode: str, prefix: str, *, blocked: bool = False) -> str:
-            if mode not in self.modes:
-                return "SKIP"
-            relevant = [step for step in self.steps if step.name.startswith(prefix)]
-            if not relevant:
-                return "SKIP"
-            if blocked:
-                return "BLOCKED"
-            if any(not step.ok and step.required for step in relevant):
-                return "FAIL"
-            return "PASS"
+        status, exit_code = compute_report_status(self.steps, self.modes)
 
         return {
             "status": status,
             "exit_code": exit_code,
             "tiers": {
-                "A_offline": _tier_status("offline", "offline_"),
-                "B_live_smoke": _tier_status("live-smoke", "live_", blocked=live_blocked),
+                "A_offline": (
+                    "SKIP" if "offline" not in self.modes
+                    else (
+                        "FAIL"
+                        if any(
+                            not step.ok and step.required and step.name.startswith("offline_")
+                            for step in self.steps
+                        )
+                        else "PASS"
+                    )
+                ),
+                "B_live_smoke": tier_live_smoke_status(self.steps, self.modes),
             },
             "modes": self.modes,
             "home_dir": self.home_dir,
@@ -459,6 +483,17 @@ def _offline_steps(report: AcceptanceReport, home_dir: Path) -> None:
     report.run_step("offline_mootdx_bounded_retry", mootdx_bounded_retry)
 
 
+def _run_with_timeout(fn: Callable[[], dict[str, Any]], timeout_sec: float) -> dict[str, Any]:
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn)
+        try:
+            return future.result(timeout=timeout_sec)
+        except FutureTimeout as exc:
+            raise AssertionError(f"network blocked: timed out after {timeout_sec}s") from exc
+
+
 def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: bool) -> None:
     if clear_proxy:
         for key in (
@@ -479,20 +514,21 @@ def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: 
     from tradingagents.screener.live import resolve_signal_trade_date, run_repository_screen
     from tradingagents.screener.report import ScreeningStatus
     from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
-    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
+    from tradingagents.dataflows.mootdx_connection import (
+        get_mootdx_manager,
+        is_mootdx_transport_error,
+    )
 
     backend = LiveFreeAStockSourceBackend()
+    mootdx_timeout = float(os.environ.get("MOOTDX_LIVE_SMOKE_TIMEOUT_SEC", "60"))
 
-    def _raise_network(exc: ProviderFetchError) -> None:
-        if exc.status == "network_error":
-            raise AssertionError(f"network blocked: {exc.message}") from exc
-        raise AssertionError(f"{exc.status}: {exc.message}") from exc
-
-    def probe_network() -> dict[str, Any]:
+    def tencent_indicators() -> dict[str, Any]:
         try:
             rows = backend.fetch_tencent_daily_indicators(["600000"])
         except ProviderFetchError as exc:
-            _raise_network(exc)
+            if exc.status == "network_error":
+                raise AssertionError(f"network blocked: {exc.message}") from exc
+            raise AssertionError(f"{exc.status}: {exc.message}") from exc
         if not rows:
             raise AssertionError("tencent indicators returned no rows for 600000")
         row = rows[0]
@@ -504,21 +540,28 @@ def _live_smoke_steps(report: AcceptanceReport, *, home_dir: Path, clear_proxy: 
             "market_cap_field": "total_market_cap_cny" if "total_market_cap_cny" in row else "mcap_yi",
         }
 
-    probe = report.run_step("live_network_probe", probe_network, required=True)
-    if not probe.ok:
-
-        def skip(name: str) -> dict[str, Any]:
-            return {"skipped": True, "reason": probe.error or "network probe failed"}
-
-        report.run_step("live_mootdx_connect", lambda: skip("mootdx"), required=False)
-        report.run_step("live_repository_screen", lambda: skip("screen"), required=False)
-        return
+    report.run_step("live_tencent_indicators", tencent_indicators, required=True)
 
     def mootdx_connect() -> dict[str, Any]:
-        frame = get_mootdx_manager().call(lambda client: client.stocks(market=0))
-        if frame is None or len(frame) < 1:
-            raise AssertionError("mootdx stocks(market=0) returned empty frame")
-        return {"row_count": len(frame)}
+        def probe() -> dict[str, Any]:
+            frame = get_mootdx_manager().call(lambda client: client.stocks(market=0))
+            if frame is None or len(frame) < 1:
+                raise AssertionError("mootdx stocks(market=0) returned empty frame")
+            return {"row_count": len(frame)}
+
+        try:
+            return _run_with_timeout(probe, mootdx_timeout)
+        except AssertionError as exc:
+            message = str(exc)
+            if "returned empty frame" in message:
+                raise
+            if message.startswith("network blocked:"):
+                raise
+            raise AssertionError(f"network blocked: {message}") from exc
+        except Exception as exc:
+            if is_mootdx_transport_error(exc) or isinstance(exc, (OSError, TimeoutError)):
+                raise AssertionError(f"network blocked: {exc}") from exc
+            raise AssertionError(f"network blocked: {exc}") from exc
 
     report.run_step("live_mootdx_connect", mootdx_connect, required=True)
 

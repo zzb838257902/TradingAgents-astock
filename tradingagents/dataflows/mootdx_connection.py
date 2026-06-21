@@ -6,6 +6,7 @@ import errno
 import os
 import socket
 import threading
+import time
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
@@ -43,10 +44,14 @@ def create_mootdx_quotes_client():
     """Connect to mootdx HQ, falling back when bestip scan is blocked."""
     from mootdx.quotes import Quotes
 
+    budget_sec = float(os.environ.get("MOOTDX_CONNECT_BUDGET_SEC", "30"))
+    deadline = time.monotonic() + budget_sec
+    per_server_timeout = min(10, max(1, int(budget_sec // 4)))
+
     skip_bestip = os.environ.get("MOOTDX_SKIP_BESTIP", "").lower() in {"1", "true", "yes"}
-    if not skip_bestip:
+    if not skip_bestip and time.monotonic() < deadline:
         try:
-            return Quotes.factory(market="std", bestip=True, timeout=10)
+            return Quotes.factory(market="std", bestip=True, timeout=per_server_timeout)
         except OSError:
             pass
 
@@ -63,11 +68,17 @@ def create_mootdx_quotes_client():
     seen: set[tuple[str, int]] = set()
     last_error: Exception | None = None
     for server in servers:
+        if time.monotonic() >= deadline:
+            break
         if server in seen:
             continue
         seen.add(server)
         try:
-            return Quotes.factory(market="std", server=server, timeout=10)
+            return Quotes.factory(
+                market="std",
+                server=server,
+                timeout=per_server_timeout,
+            )
         except Exception as exc:
             last_error = exc
     raise OSError(f"unable to connect to mootdx HQ server: {last_error}")
@@ -91,6 +102,8 @@ class MootdxConnectionManager:
     ) -> None:
         self._lock = threading.RLock()
         self._client: Any | None = None
+        self._active_calls = 0
+        self._clients_to_close: list[Any] = []
         self._connect_fn = connect_fn or create_mootdx_quotes_client
 
     def connect(self) -> Any:
@@ -99,12 +112,28 @@ class MootdxConnectionManager:
                 self._client = self._connect_fn()
             return self._client
 
+    def _retire_client_locked(self, client: Any) -> None:
+        if self._active_calls > 0:
+            self._clients_to_close.append(client)
+        else:
+            _close_client(client)
+
+    def _finish_call_locked(self) -> None:
+        self._active_calls -= 1
+        if self._active_calls == 0 and self._clients_to_close:
+            pending = self._clients_to_close
+            self._clients_to_close = []
+        else:
+            pending = []
+        for client in pending:
+            _close_client(client)
+
     def invalidate(self) -> None:
         with self._lock:
             client = self._client
             self._client = None
-        if client is not None:
-            _close_client(client)
+            if client is not None:
+                self._retire_client_locked(client)
 
     def close(self) -> None:
         self.invalidate()
@@ -112,17 +141,29 @@ class MootdxConnectionManager:
     def call(self, operation: Callable[[Any], T]) -> T:
         last_error: BaseException | None = None
         for attempt in range(2):
-            client = self.connect()
+            with self._lock:
+                if self._client is None:
+                    self._client = self._connect_fn()
+                client = self._client
+                self._active_calls += 1
             try:
-                return operation(client)
-            except BaseException as exc:
-                if not is_mootdx_transport_error(exc):
+                try:
+                    return operation(client)
+                except BaseException as exc:
+                    if not is_mootdx_transport_error(exc):
+                        raise
+                    last_error = exc
+                    with self._lock:
+                        if attempt == 0 and self._client is client:
+                            stale = self._client
+                            self._client = None
+                            self._retire_client_locked(stale)
+                    if attempt == 0:
+                        continue
                     raise
-                last_error = exc
-                if attempt == 0:
-                    self.invalidate()
-                    continue
-                raise
+            finally:
+                with self._lock:
+                    self._finish_call_locked()
         assert last_error is not None
         raise last_error
 

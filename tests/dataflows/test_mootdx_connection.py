@@ -115,7 +115,38 @@ def test_concurrent_calls_share_one_client():
     assert created == [1]
 
 
-def test_close_invalidates_client_before_retry():
+def test_close_waits_until_active_operation_finishes():
+    client = _FakeClient(1)
+    manager = MootdxConnectionManager(connect_fn=lambda: client)
+    state = {
+        "close_completed_while_operation_active": False,
+        "operation_observed_closed": True,
+    }
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+
+    def operation(active_client: _FakeClient) -> str:
+        operation_started.set()
+        release_operation.wait(timeout=5)
+        state["operation_observed_closed"] = active_client.closed
+        return "ok"
+
+    def closer() -> None:
+        operation_started.wait(timeout=5)
+        manager.close()
+        state["close_completed_while_operation_active"] = not release_operation.is_set()
+
+    closer_thread = threading.Thread(target=closer)
+    closer_thread.start()
+    assert manager.call(operation) == "ok"
+    release_operation.set()
+    closer_thread.join(timeout=5)
+    assert state["operation_observed_closed"] is False
+    assert client.closed is True
+    assert state["close_completed_while_operation_active"] is True
+
+
+def test_transport_error_closes_stale_client_after_operation():
     clients: list[_FakeClient] = []
 
     def connect_fn():
@@ -126,15 +157,15 @@ def test_close_invalidates_client_before_retry():
     manager = MootdxConnectionManager(connect_fn=connect_fn)
     attempts = {"count": 0}
 
-    def operation(client: _FakeClient) -> int:
+    def operation(_client: _FakeClient) -> int:
         attempts["count"] += 1
         if attempts["count"] == 1:
-            manager.close()
             raise ConnectionResetError("stale socket")
-        return client.client_id
+        return clients[-1].client_id
 
     assert manager.call(operation) == 2
     assert clients[0].closed is True
+    assert clients[1].closed is False
 
 
 def test_get_mootdx_manager_is_process_singleton():

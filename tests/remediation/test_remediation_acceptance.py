@@ -5,10 +5,21 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "accept_existing_defect_remediation.py"
+
+
+@dataclass
+class _Step:
+    name: str
+    ok: bool
+    required: bool = True
+    error: str | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
 
 
 def _run_accept(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -31,6 +42,62 @@ def _run_accept(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[s
 
 def _parse_report(stdout: str) -> dict:
     return json.loads(stdout)
+
+
+def test_compute_report_status_tencent_ok_mootdx_blocked():
+    from scripts.accept_existing_defect_remediation import compute_report_status
+
+    steps = [
+        _Step("live_tencent_indicators", True),
+        _Step(
+            "live_mootdx_connect",
+            False,
+            error="AssertionError: network blocked: [Errno 113] No route to host",
+        ),
+        _Step("live_repository_screen", True),
+    ]
+    status, exit_code = compute_report_status(steps, ["live-smoke"])
+    assert status == "BLOCKED"
+    assert exit_code == 2
+
+
+def test_compute_report_status_tencent_blocked_still_runs_other_steps():
+    from scripts.accept_existing_defect_remediation import compute_report_status
+
+    steps = [
+        _Step(
+            "live_tencent_indicators",
+            False,
+            error="AssertionError: network blocked: SSL handshake timed out",
+        ),
+        _Step(
+            "live_mootdx_connect",
+            False,
+            error="AssertionError: network blocked: timed out after 60s",
+        ),
+        _Step("live_repository_screen", True),
+    ]
+    status, exit_code = compute_report_status(steps, ["live-smoke"])
+    assert status == "BLOCKED"
+    assert exit_code == 2
+    assert sum(1 for step in steps if step.name.startswith("live_")) == 3
+
+
+def test_compute_report_status_repository_failure_is_fail():
+    from scripts.accept_existing_defect_remediation import compute_report_status
+
+    steps = [
+        _Step("live_tencent_indicators", True),
+        _Step("live_mootdx_connect", True),
+        _Step(
+            "live_repository_screen",
+            False,
+            error="AssertionError: expected ok, got data_error",
+        ),
+    ]
+    status, exit_code = compute_report_status(steps, ["live-smoke"])
+    assert status == "FAIL"
+    assert exit_code == 1
 
 
 def test_accept_offline_passes(tmp_path):

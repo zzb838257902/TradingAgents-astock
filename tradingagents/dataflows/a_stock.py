@@ -81,17 +81,17 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     if _name_to_code is not None:
         return _name_to_code, _code_to_name
 
-    from mootdx.quotes import Quotes
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
-    client = Quotes.factory(market="std")
+    manager = get_mootdx_manager()
     n2c: dict[str, str] = {}
     c2n: dict[str, str] = {}
 
     for market in (0, 1):  # 0=SZ, 1=SH
-        stocks = client.stocks(market=market)
-        if stocks is None or stocks.empty:
+        frame = manager.call(lambda client, m=market: client.stocks(market=m))
+        if frame is None or frame.empty:
             continue
-        for _, row in stocks.iterrows():
+        for _, row in frame.iterrows():
             code = str(row["code"]).strip()
             name = str(row["name"]).strip()
             if not _re.match(r"^[036]\d{5}$", code):
