@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -538,6 +538,36 @@ def _migration_steps() -> list[tuple[int, str]]:
                 PRIMARY KEY(board_type, alias_normalized, source)
             );
         """),
+        (11, """
+            CREATE TABLE IF NOT EXISTS daily_indicators (
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                pe_ttm DOUBLE,
+                pb DOUBLE,
+                turnover_pct DOUBLE,
+                total_market_cap_cny DOUBLE NOT NULL,
+                float_market_cap_cny DOUBLE NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(symbol, trade_date, source)
+            );
+            CREATE TABLE IF NOT EXISTS staging_daily_indicators (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                pe_ttm DOUBLE,
+                pb DOUBLE,
+                turnover_pct DOUBLE,
+                total_market_cap_cny DOUBLE NOT NULL,
+                float_market_cap_cny DOUBLE NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                source VARCHAR NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, symbol, trade_date, source)
+            );
+        """),
     ]
 
 
@@ -558,11 +588,17 @@ def apply_migrations(path: Path) -> int:
         for version, sql in _migration_steps():
             if version in applied:
                 continue
-            connection.execute(sql)
-            connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                [version, now],
-            )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(sql)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    [version, now],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return CURRENT_SCHEMA_VERSION
     finally:
         connection.close()

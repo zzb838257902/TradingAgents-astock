@@ -149,3 +149,19 @@ class ProviderCapability(BaseModel):
     license_note: str = ""
     probed_at: datetime
     error: str | None = None
+
+
+class DailyIndicator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    trade_date: date
+    pe_ttm: float | None = None
+    pb: float | None = None
+    turnover_pct: float | None = None
+    total_market_cap_cny: float
+    float_market_cap_cny: float
+    available_at: datetime
+    source: str
+    ingested_at: datetime | None = None
+    dataset_version_id: str | None = None
