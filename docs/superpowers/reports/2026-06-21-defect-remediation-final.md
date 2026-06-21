@@ -1,7 +1,7 @@
 # 现有功能缺陷修复 — 最终验收报告
 
 > 日期：2026-06-21（复审修复版）
-> HEAD：见文末「Commit 清单」最新条目
+> HEAD：`faca4904`（含 P1 修复 `fcd6cc4c`）
 > 状态：**P1 复审修复已提交** — 待复跑 Tier B 与独立 diff 复审
 
 ## 摘要
@@ -52,7 +52,7 @@
 | `f2591ed0` | Task 6：Mootdx 受控重连 |
 | `0de3c5f6` | Task 7：分层最终验收 |
 | `a8782490` | 最终验收报告（首版） |
-| *(pending)* | **P1 复审修复**（mootdx 生命周期、name map、Tier B、文档） |
+| `fcd6cc4c` | P1 复审修复（mootdx 生命周期、name map、Tier B、文档） |
 
 中期验收记录：
 
@@ -159,7 +159,7 @@ MOOTDX_SKIP_BESTIP=1 PYTHONPATH='.pip_packages:.' \
 
 ## 宣告完成条件
 
-1. R0–R7 + 复审 fix 全部提交 ⏳
+1. R0–R7 + 复审 fix 全部提交 ✅
 2. 两次中期验收确认 ✅
 3. 全量回归通过 ✅
 4. Tier A PASS ✅
