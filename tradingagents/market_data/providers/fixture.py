@@ -25,6 +25,7 @@ from tradingagents.market_data.contracts import (
 )
 from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai
 from tradingagents.market_data.pit import require_pit_required
+from tradingagents.market_data.providers.free_astock_sources import _post_close_available_at
 from tradingagents.market_data.sync_policy import live_snapshot_date_error
 
 
@@ -171,10 +172,10 @@ class FixtureProvider:
             status=DataStatus.SUCCESS_EMPTY,
             source=self.name,
             as_of=run_time,
-            available_at=run_time,
+            available_at=_post_close_available_at(trade_date),
             ingested_at=run_time,
             run_time=run_time,
-            pit_level=PITLevel.PIT_REQUIRED,
+            pit_level=PITLevel.BEST_EFFORT,
         )
 
     def get_financials(

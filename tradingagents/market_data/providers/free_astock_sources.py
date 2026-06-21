@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from datetime import date, datetime, time
 from typing import Any, Protocol
@@ -81,6 +82,121 @@ def _post_close_available_at(trade_date: date) -> datetime:
     return datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI)
 
 
+CNY_PER_WAN = 10_000
+CNY_PER_YI = 100_000_000
+
+
+def _tencent_market_prefix(code: str) -> str:
+    if code.startswith(("6", "9")):
+        return "sh"
+    if code.startswith("8"):
+        return "bj"
+    return "sz"
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def normalize_tencent_daily_indicator_row(
+    symbol: str,
+    trade_date: date,
+    raw: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    if not _A_SHARE_CODE.match(symbol):
+        raise ValueError(f"invalid symbol: {symbol}")
+    mcap_yi = _finite_float(raw.get("mcap_yi"))
+    float_mcap_yi = _finite_float(raw.get("float_mcap_yi"))
+    if mcap_yi is None or float_mcap_yi is None:
+        raise ValueError(f"missing market cap for {symbol}")
+    total_market_cap_cny = mcap_yi * CNY_PER_YI
+    float_market_cap_cny = float_mcap_yi * CNY_PER_YI
+    if total_market_cap_cny < 0:
+        raise ValueError("total_market_cap_cny must be non-negative")
+    if float_market_cap_cny < 0:
+        raise ValueError("float_market_cap_cny must be non-negative")
+    turnover_pct = _finite_float(raw.get("turnover_pct"))
+    if turnover_pct is not None and turnover_pct < 0:
+        raise ValueError("turnover_pct must be non-negative")
+    return {
+        "symbol": symbol,
+        "trade_date": trade_date,
+        "pe_ttm": _finite_float(raw.get("pe_ttm")),
+        "pb": _finite_float(raw.get("pb")),
+        "turnover_pct": turnover_pct,
+        "total_market_cap_cny": total_market_cap_cny,
+        "float_market_cap_cny": float_market_cap_cny,
+        "available_at": _post_close_available_at(trade_date),
+        "source": source,
+    }
+
+
+def normalize_tushare_daily_indicator_row(
+    row: dict[str, Any],
+    trade_date: date,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    symbol = str(row["ts_code"]).split(".", 1)[0]
+    if not _A_SHARE_CODE.match(symbol):
+        raise ValueError(f"invalid symbol: {symbol}")
+    total_mv = _finite_float(row.get("total_mv"))
+    circ_mv = _finite_float(row.get("circ_mv"))
+    if total_mv is None or circ_mv is None:
+        raise ValueError(f"missing market cap for {symbol}")
+    total_market_cap_cny = total_mv * CNY_PER_WAN
+    float_market_cap_cny = circ_mv * CNY_PER_WAN
+    if total_market_cap_cny < 0 or float_market_cap_cny < 0:
+        raise ValueError("market cap must be non-negative")
+    turnover_pct = _finite_float(row.get("turnover_rate"))
+    if turnover_pct is not None and turnover_pct < 0:
+        raise ValueError("turnover_pct must be non-negative")
+    return {
+        "symbol": symbol,
+        "trade_date": trade_date,
+        "pe_ttm": _finite_float(row.get("pe_ttm") or row.get("pe")),
+        "pb": _finite_float(row.get("pb")),
+        "turnover_pct": turnover_pct,
+        "total_market_cap_cny": total_market_cap_cny,
+        "float_market_cap_cny": float_market_cap_cny,
+        "available_at": _post_close_available_at(trade_date),
+        "source": source,
+    }
+
+
+def parse_tencent_quote_response(raw: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in raw.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        vals = line.split('"')[1].split("~")
+        if len(vals) < 53:
+            continue
+        code = key[2:]
+        if not _A_SHARE_CODE.match(code):
+            continue
+        rows.append({
+            "symbol": code,
+            "pe_ttm": _finite_float(vals[39]),
+            "pb": _finite_float(vals[46]),
+            "turnover_pct": _finite_float(vals[38]),
+            "mcap_yi": _finite_float(vals[44]),
+            "float_mcap_yi": _finite_float(vals[45]),
+        })
+    return rows
+
+
 class FreeAStockSourceBackend(Protocol):
     def list_mootdx_stocks(self) -> list[dict[str, Any]]: ...
 
@@ -107,6 +223,11 @@ class FreeAStockSourceBackend(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def fetch_ths_hot_topic_rows(self, trade_date: date) -> list[dict[str, Any]]: ...
+
+    def fetch_tencent_daily_indicators(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]: ...
 
 
 class LiveFreeAStockSourceBackend:
@@ -461,6 +582,47 @@ class LiveFreeAStockSourceBackend:
                 "source_record_id": f"{trade_date.isoformat()}:{item.get('code', '')}:{reason}",
             })
         return rows
+
+    def fetch_tencent_daily_indicators(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]:
+        import urllib.error
+        import urllib.request
+
+        valid = [symbol for symbol in symbols if _A_SHARE_CODE.match(symbol)]
+        if not valid:
+            return []
+        prefixed = [f"{_tencent_market_prefix(code)}{code}" for code in valid]
+        url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+        request = urllib.request.Request(url)
+        request.add_header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                if status == 429:
+                    raise ProviderFetchError("rate_limited", f"HTTP 429 for {url}")
+                if status >= 400:
+                    raise ProviderFetchError("http_error", f"HTTP {status} for {url}")
+                raw = response.read().decode("gbk", errors="replace")
+        except ProviderFetchError:
+            raise
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                raise ProviderFetchError("rate_limited", f"HTTP 429 for {url}") from exc
+            raise ProviderFetchError("http_error", f"HTTP {exc.code} for {url}") from exc
+        except Exception as exc:
+            raise ProviderFetchError("network_error", str(exc)) from exc
+        try:
+            parsed = parse_tencent_quote_response(raw)
+        except Exception as exc:
+            raise ProviderFetchError("parse_error", str(exc)) from exc
+        if not parsed and raw.strip():
+            raise ProviderFetchError("parse_error", "unable to parse tencent quote response")
+        return parsed
 
 
 def _report_period_from_row(row: pd.Series) -> str | None:

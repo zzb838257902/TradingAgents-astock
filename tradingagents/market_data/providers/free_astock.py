@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Sequence
 
@@ -27,11 +28,13 @@ from tradingagents.market_data.providers.free_astock_sources import (
     FreeAStockSourceBackend,
     LiveFreeAStockSourceBackend,
     ProviderFetchError,
+    normalize_tencent_daily_indicator_row,
+    _post_close_available_at,
 )
 from tradingagents.events.contracts import MarketEvent
 from tradingagents.events.normalizer import normalize_fund_flow_row, normalize_hot_topic_row, normalize_news_row
 from tradingagents.events.fetch import collect_announcement_bundles, retry_fetch
-from tradingagents.market_data.sync_policy import live_snapshot_date_error
+from tradingagents.market_data.sync_policy import live_snapshot_date_error, shanghai_today
 from tradingagents.dataflows.a_stock import SINA_SSE_CALENDAR_MAX_BARS
 
 _PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
@@ -51,6 +54,14 @@ _EVENT_PROBE_SPECS: list[tuple[str, str, PITLevel, str]] = [
     ("event_fund_flow", "eastmoney.push2.fund_flow", PITLevel.BEST_EFFORT, "daily main force"),
     ("event_hot_topics", "ths.10jqka.getharden", PITLevel.CURRENT_ONLY, "same-day snapshot"),
 ]
+
+_DEFAULT_INDICATOR_BATCH_SIZE = 80
+_FETCH_ERROR_TO_STATUS = {
+    "network_error": DataStatus.NETWORK_ERROR,
+    "http_error": DataStatus.HTTP_ERROR,
+    "parse_error": DataStatus.PARSE_ERROR,
+    "rate_limited": DataStatus.RATE_LIMITED,
+}
 
 
 def _result(
@@ -91,9 +102,25 @@ def _earliest_bar_trade_date(bars: list[dict]) -> date | None:
 class FreeAStockProvider:
     name = "free_astock"
 
-    def __init__(self, backend: FreeAStockSourceBackend | None = None):
+    def __init__(
+        self,
+        backend: FreeAStockSourceBackend | None = None,
+        *,
+        batch_size: int = _DEFAULT_INDICATOR_BATCH_SIZE,
+        batch_pause: float = 0.0,
+        sleeper: Callable[[float], None] | None = None,
+        random_fn: Callable[[float, float], float] | None = None,
+        retry_base_delay: float = 0.5,
+        max_attempts: int = 3,
+    ):
         self._backend = backend or LiveFreeAStockSourceBackend()
         self._daily_adapter = ExistingAStockProvider()
+        self._batch_size = batch_size
+        self._batch_pause = batch_pause
+        self._sleeper = sleeper
+        self._random_fn = random_fn
+        self._retry_base_delay = retry_base_delay
+        self._max_attempts = max_attempts
 
     def list_securities(self, as_of: date) -> DataResult[list[SecurityRecord]]:
         run_time = datetime.now(tz=SHANGHAI)
@@ -243,15 +270,116 @@ class FreeAStockProvider:
 
     def get_daily_indicators(self, trade_date: date) -> DataResult[list[dict]]:
         run_time = datetime.now(tz=SHANGHAI)
+        today = shanghai_today()
+        if trade_date != today:
+            return _result(
+                None,
+                status=DataStatus.NOT_AVAILABLE_YET,
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.BEST_EFFORT,
+                errors=[
+                    "daily_indicators free path only supports the current Shanghai trade date "
+                    f"{today.isoformat()}; requested {trade_date.isoformat()}",
+                ],
+            )
+        try:
+            symbols = [
+                row["symbol"]
+                for row in self._backend.list_mootdx_stocks()
+                if row.get("symbol")
+            ]
+        except Exception as exc:
+            return _result(
+                None,
+                status=DataStatus.NETWORK_ERROR,
+                source=self.name,
+                as_of=run_time,
+                available_at=run_time,
+                pit_level=PITLevel.BEST_EFFORT,
+                errors=[str(exc)],
+            )
+
+        rows: list[dict] = []
+        for batch_index, batch_start in enumerate(range(0, len(symbols), self._batch_size)):
+            batch = symbols[batch_start:batch_start + self._batch_size]
+            if batch_index > 0:
+                self._sleep_between_batches()
+            try:
+                raw_rows = self._fetch_tencent_indicators_with_retry(batch)
+            except ProviderFetchError as exc:
+                status = _FETCH_ERROR_TO_STATUS.get(exc.status, DataStatus.ERROR)
+                return _result(
+                    None,
+                    status=status,
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=run_time,
+                    pit_level=PITLevel.BEST_EFFORT,
+                    errors=[exc.message],
+                )
+            for raw in raw_rows:
+                symbol = str(raw.get("symbol", "")).strip()
+                try:
+                    rows.append(
+                        normalize_tencent_daily_indicator_row(
+                            symbol,
+                            trade_date,
+                            raw,
+                            source=self.name,
+                        )
+                    )
+                except ValueError:
+                    continue
+
+        status = DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY
+        available_at = (
+            max(row["available_at"] for row in rows)
+            if rows
+            else _post_close_available_at(trade_date)
+        )
         return _result(
-            [],
-            status=DataStatus.NOT_AVAILABLE_YET,
+            rows,
+            status=status,
             source=self.name,
             as_of=run_time,
-            available_at=run_time,
+            available_at=available_at,
             pit_level=PITLevel.BEST_EFFORT,
-            errors=["daily_indicators not implemented for free_astock"],
         )
+
+    def _sleep_between_batches(self) -> None:
+        if self._batch_pause <= 0:
+            return
+        import random
+        import time
+
+        sleeper = self._sleeper or time.sleep
+        jitter = (self._random_fn or random.uniform)(0.0, 0.1)
+        sleeper(self._batch_pause + jitter)
+
+    def _fetch_tencent_indicators_with_retry(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]:
+        import time
+
+        sleeper = self._sleeper or time.sleep
+        last_error: ProviderFetchError | None = None
+        retriable = set(_FETCH_ERROR_TO_STATUS)
+        for attempt in range(self._max_attempts):
+            try:
+                return self._backend.fetch_tencent_daily_indicators(symbols)
+            except ProviderFetchError as exc:
+                if exc.status not in retriable:
+                    raise
+                last_error = exc
+                if attempt + 1 >= self._max_attempts:
+                    raise
+                sleeper(self._retry_base_delay * (2 ** attempt))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("indicator fetch retry exhausted")
 
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime

@@ -21,6 +21,7 @@ from tradingagents.market_data.contracts import (
 )
 from tradingagents.market_data.financials import financial_available_at
 from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai
+from tradingagents.market_data.providers.free_astock_sources import normalize_tushare_daily_indicator_row
 
 _RATE_LIMIT_PATTERN = re.compile(r"每分钟最多访问")
 _PERMISSION_PATTERN = re.compile(r"权限|积分|没有访问|接口不存在")
@@ -472,23 +473,23 @@ class TushareProvider:
             )
             rows: list[dict] = []
             for row in frame.to_dict(orient="records"):
-                symbol = denormalize_ts_code(str(row["ts_code"]))
-                rows.append({
-                    "symbol": symbol,
-                    "trade_date": trade_date,
-                    "pe": float(row.get("pe") or 0.0),
-                    "pb": float(row.get("pb") or 0.0),
-                    "turnover_rate": float(row.get("turnover_rate") or 0.0),
-                    "total_mv": float(row.get("total_mv") or 0.0),
-                    "available_at": datetime.combine(trade_date, time(15, 30), tzinfo=SHANGHAI),
-                    "source": self.name,
-                })
+                rows.append(
+                    normalize_tushare_daily_indicator_row(
+                        row,
+                        trade_date,
+                        source=self.name,
+                    )
+                )
             return rows
 
         result = self._wrap_call(call)
         if result.data is None:
             return result
-        return result.model_copy(update={"data": result.data})
+        rows = result.data
+        return result.model_copy(update={
+            "data": rows,
+            "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
+        })
 
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime
