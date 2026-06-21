@@ -37,6 +37,7 @@ from cli.analyst_registry import (
     all_report_sections,
     collect_analyst_report_parts,
     normalize_selected_analyst_keys,
+    report_section_output_filename,
 )
 from cli.announcements import fetch_announcements, display_announcements
 from cli.stats_handler import StatsCallbackHandler
@@ -962,7 +963,7 @@ def run_analysis(checkpoint: bool = False):
             if section_name in obj.report_sections and obj.report_sections[section_name] is not None:
                 content = obj.report_sections[section_name]
                 if content:
-                    file_name = f"{section_name}.md"
+                    file_name = report_section_output_filename(section_name)
                     text = "\n".join(str(item) for item in content) if isinstance(content, list) else content
                     with open(report_dir / file_name, "w", encoding="utf-8") as f:
                         f.write(text)

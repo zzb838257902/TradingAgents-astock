@@ -193,6 +193,82 @@ def test_repository_screen_industry_and_concept(tmp_path):
     assert concept_report.ranking == ["600001"]
 
 
+def test_repository_screen_index(tmp_path):
+    fixture = json.loads(MINI.read_text(encoding="utf-8"))
+    fixture["board_definitions"] = list(fixture.get("board_definitions", [])) + [
+        {
+            "board_type": "index",
+            "board_code": "000300.SH",
+            "name": "沪深300",
+            "pit_level": "pit_required",
+        },
+    ]
+    fixture["board_memberships"] = list(fixture.get("board_memberships", [])) + [
+        {
+            "board_type": "index",
+            "board_code": "000300.SH",
+            "symbol": "600001",
+            "membership_mode": "effective_interval",
+            "effective_from": "2025-01-01",
+            "available_at": "2025-01-01T09:00:00+08:00",
+        },
+    ]
+    paths = MarketDataPaths(home_dir=tmp_path)
+    repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
+    load_fixture_into_repository(repo, fixture)
+    config = _relaxed_config(tmp_path)
+    trade_date, signal_time, _ = resolve_signal_trade_date(
+        repo,
+        as_of="2026-01-03T15:30:00+08:00",
+        today=date(2026, 1, 3),
+    )
+    report = run_repository_screen(
+        repo,
+        config,
+        paths.live_db_path,
+        UniverseRequest(
+            universe_type=UniverseType.INDEX,
+            universe_code="000300.SH",
+            as_of=signal_time,
+        ),
+        trade_date=trade_date,
+        signal_time=signal_time,
+    )
+    assert report.status == ScreeningStatus.OK
+    assert report.ranking == ["600001"]
+
+
+def test_missing_signal_day_quotes_returns_data_error(tmp_path):
+    repo = _load_live_repo(tmp_path)
+    repo.connection.execute(
+        "DELETE FROM daily_bars WHERE trade_date = ?",
+        [date(2026, 1, 3)],
+    )
+    config = _relaxed_config(tmp_path)
+    paths = MarketDataPaths(home_dir=tmp_path)
+    trade_date, signal_time, _ = resolve_signal_trade_date(
+        repo,
+        as_of="2026-01-03T15:30:00+08:00",
+        today=date(2026, 1, 3),
+    )
+    report = run_repository_screen(
+        repo,
+        config,
+        paths.live_db_path,
+        UniverseRequest(
+            universe_type=UniverseType.CUSTOM,
+            symbols=("600001",),
+            as_of=signal_time,
+        ),
+        trade_date=trade_date,
+        signal_time=signal_time,
+    )
+    assert report.status == ScreeningStatus.DATA_ERROR
+    assert report.ranking == []
+    assert "signal date" in report.errors[0].lower()
+    assert "600001" in report.errors[0]
+
+
 def test_repository_screen_cli_without_fixture(tmp_path):
     _load_live_repo(tmp_path)
     config_path = _write_relaxed_config(tmp_path)

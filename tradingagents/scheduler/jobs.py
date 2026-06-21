@@ -82,7 +82,9 @@ def run_after_close(
     fixture: dict | None = None,
     force: bool = False,
 ) -> AfterCloseResult:
-    signal_time = max(post_close_signal_time(trade_date), datetime.now(tz=SHANGHAI))
+    signal_time = post_close_signal_time(trade_date)
+    if trade_date == shanghai_today():
+        signal_time = max(signal_time, datetime.now(tz=SHANGHAI))
     request = universe_request or UniverseRequest(
         universe_type=UniverseType.ALL,
         as_of=signal_time,

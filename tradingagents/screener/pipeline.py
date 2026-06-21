@@ -84,6 +84,33 @@ def _avg_amount_20d(rows: list[dict], signal_date: date) -> float:
     return sum(window) / len(window) if window else 0.0
 
 
+def _signal_day_bar(
+    symbol: str,
+    signal_date: date,
+    signal_day_bars: dict[str, dict],
+    daily_by_symbol: dict[str, list[dict]],
+) -> dict | None:
+    if symbol in signal_day_bars:
+        return signal_day_bars[symbol]
+    for row in daily_by_symbol.get(symbol, []):
+        if _parse_trade_date(row["trade_date"]) == signal_date:
+            return row
+    return None
+
+
+def _symbols_missing_signal_day_quotes(
+    symbols: list[str],
+    signal_date: date,
+    signal_day_bars: dict[str, dict],
+    daily_by_symbol: dict[str, list[dict]],
+) -> list[str]:
+    return [
+        symbol
+        for symbol in symbols
+        if _signal_day_bar(symbol, signal_date, signal_day_bars, daily_by_symbol) is None
+    ]
+
+
 def _collect_dataset_versions(repo: MarketDataRepository) -> dict[str, dict | None]:
     datasets = ("security_master", "daily_bars", "trade_calendar", "financials")
     return {name: repo.get_latest_published_version(name) for name in datasets}
@@ -261,15 +288,48 @@ def run_screen(
         daily_by_symbol[row["symbol"]].append(row)
 
     signal_day_bars = bars_for_bt.get(signal_date, {})
+    symbols_requiring_signal_bar = (
+        sorted(set(resolved.symbols))
+        if request.universe_type != UniverseType.ALL
+        else all_symbols
+    )
+    missing_signal_day = _symbols_missing_signal_day_quotes(
+        symbols_requiring_signal_bar,
+        signal_date,
+        signal_day_bars,
+        daily_by_symbol,
+    )
+    if missing_signal_day:
+        return _base_report(
+            run_id=run,
+            signal_time=signal_time,
+            universe_request=request,
+            universe_size=universe_size,
+            pit_level=pit_level,
+            dataset_versions=dataset_versions,
+            data_sources=data_sources,
+            status=ScreeningStatus.DATA_ERROR,
+            errors=[
+                "missing published quotes for signal date "
+                f"{signal_date.isoformat()}: {', '.join(missing_signal_day)}"
+            ],
+            data_quality=data_quality,
+        )
+
     candidates: list[CandidateInput] = []
     for record in effective:
         symbol = record.symbol
         meta = symbol_meta.get(symbol, {})
         industry = meta.get("industry", "未知")
         history = daily_by_symbol.get(symbol, [])
-        if not history:
+        signal_bar = _signal_day_bar(
+            symbol,
+            signal_date,
+            signal_day_bars,
+            daily_by_symbol,
+        )
+        if signal_bar is None:
             continue
-        signal_bar = signal_day_bars.get(symbol, history[-1])
         suspended = repo.is_suspended_on(symbol, signal_date, signal_time) or bool(
             signal_bar.get("suspended", signal_bar.get("volume", 0) <= 0)
         )

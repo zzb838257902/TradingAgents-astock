@@ -82,6 +82,9 @@ ANALYST_SECTION_TITLES: dict[str, str] = {
 ANALYST_OUTPUT_FILENAMES: dict[str, str] = {
     spec.key: spec.output_filename for spec in ANALYST_SPECS
 }
+ANALYST_REPORT_FILENAMES: dict[str, str] = {
+    spec.report_key: spec.output_filename for spec in ANALYST_SPECS
+}
 
 ANALYST_CHOICES: list[tuple[str, AnalystType]] = [
     (spec.graph_node_name, AnalystType(spec.key)) for spec in ANALYST_SPECS
@@ -137,3 +140,7 @@ def normalize_selected_analyst_keys(selected: list[str | AnalystType]) -> list[s
         for item in selected
     }
     return [key for key in ANALYST_ORDER if key in selected_set]
+
+
+def report_section_output_filename(section_name: str) -> str:
+    return ANALYST_REPORT_FILENAMES.get(section_name, f"{section_name}.md")

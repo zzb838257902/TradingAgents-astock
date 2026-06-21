@@ -13,6 +13,7 @@ from cli.analyst_registry import (
     ORIGINAL_FOUR_ANALYST_KEYS,
     analyst_report_sections,
     normalize_selected_analyst_keys,
+    report_section_output_filename,
 )
 from cli.models import AnalystType
 from cli.utils import ANALYST_CHOICES as UTILS_ANALYST_CHOICES
@@ -81,3 +82,9 @@ def test_analyst_report_sections_cover_all_report_keys():
     sections = analyst_report_sections()
     assert set(sections) == {spec.report_key for spec in ANALYST_SPECS}
     assert sections["hot_money_report"] == ("hot_money", "Hot_money Analyst")
+
+
+def test_report_section_output_filename_uses_registry_names():
+    assert report_section_output_filename("policy_report") == "policy.md"
+    assert report_section_output_filename("hot_money_report") == "hot_money.md"
+    assert report_section_output_filename("investment_plan") == "investment_plan.md"
