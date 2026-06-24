@@ -68,7 +68,7 @@ def test_upgrade_from_v10_adds_daily_indicator_tables(tmp_path):
         connection.close()
 
     version = apply_migrations(db_path)
-    assert version == 11
+    assert version == CURRENT_SCHEMA_VERSION == 12
     connection = duckdb.connect(str(db_path))
     try:
         tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
@@ -79,6 +79,7 @@ def test_upgrade_from_v10_adds_daily_indicator_tables(tmp_path):
             for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
         }
         assert 11 in applied
+        assert 12 in applied
     finally:
         connection.close()
 
