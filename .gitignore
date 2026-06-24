@@ -1,6 +1,9 @@
 # Local git worktrees (superpowers:using-git-worktrees)
 .worktrees/
 
+# Worktree-local pip package symlink
+.pip_packages/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

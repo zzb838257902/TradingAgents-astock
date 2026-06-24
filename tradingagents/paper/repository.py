@@ -32,6 +32,7 @@ from tradingagents.paper.exceptions import (
     AccountNotFound,
     IdempotencyConflict,
     InvalidExecutionBatch,
+    LeaseNotHeld,
     OrderNotFound,
     StaleFencingToken,
 )
@@ -190,6 +191,90 @@ def _position_payload_hash(entry: PositionEntry) -> str:
     )
 
 
+def _screen_run_payload_hash(screen_run: FrozenScreenRun) -> str:
+    return _hash_payload(
+        {
+            "screen_content_hash": screen_run.screen_content_hash,
+            "status": screen_run.status,
+            "signal_time": screen_run.signal_time.isoformat(),
+            "target_portfolio_mode": screen_run.target_portfolio_mode.value,
+            "target_weights_json": screen_run.target_weights_json,
+            "cash_weight": str(screen_run.cash_weight),
+            "dataset_versions_json": screen_run.dataset_versions_json,
+            "event_dataset_versions_json": screen_run.event_dataset_versions_json,
+            "run_report_json": screen_run.run_report_json,
+        }
+    )
+
+
+def _run_input_payload_hash(capture: RunInputCapture) -> str:
+    return _hash_payload(
+        {
+            "row_content_hash": capture.row_content_hash,
+            "row_json": capture.row_json,
+            "source_dataset_version_id": capture.source_dataset_version_id,
+            "source_available_at": (
+                capture.source_available_at.isoformat()
+                if capture.source_available_at is not None
+                else None
+            ),
+        }
+    )
+
+
+def _rebalance_spec_payload_hash(spec: RebalanceRevisionSpec) -> str:
+    return _hash_payload(
+        {
+            "account_id": spec.account_id,
+            "screen_run_id": spec.screen_run_id,
+            "screen_content_hash": spec.screen_content_hash,
+            "target_hash": spec.target_hash,
+            "signal_date": spec.signal_date.isoformat(),
+            "signal_time": spec.signal_time.isoformat(),
+            "execution_date": spec.execution_date.isoformat(),
+            "universe_hash": spec.universe_hash,
+            "config_hash": spec.config_hash,
+            "strategy_version": spec.strategy_version,
+            "target_weights_json": spec.target_weights_json,
+            "logical_run_key": spec.logical_run_key,
+            "revision": spec.revision,
+            "status": spec.status.value,
+        }
+    )
+
+
+def _order_payload_hash(order: PaperOrder) -> str:
+    return _hash_payload(
+        {
+            "rebalance_run_id": order.rebalance_run_id,
+            "account_id": order.account_id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "planned_quantity": order.planned_quantity,
+            "filled_quantity": order.filled_quantity,
+            "remaining_quantity": order.remaining_quantity,
+            "reference_price_cny": str(order.reference_price_cny),
+            "limit_price_cny": (
+                str(order.limit_price_cny) if order.limit_price_cny is not None else None
+            ),
+            "status": order.status.value,
+            "rejection_code": order.rejection_code,
+            "rejection_detail": order.rejection_detail,
+        }
+    )
+
+
+def _require_fencing(
+    *,
+    fencing_token: int | None,
+    owner_id: str | None,
+    operation: str,
+    _in_transaction: bool,
+) -> None:
+    if not _in_transaction and (fencing_token is None or owner_id is None):
+        raise LeaseNotHeld(f"{operation} requires fencing_token and owner_id")
+
+
 class PaperRepository:
     def __init__(self, paths: PaperPaths):
         self.paths = paths
@@ -259,7 +344,20 @@ class PaperRepository:
             updated_at=now,
         )
 
-    def append_cash_entry(self, entry: CashEntry, *, _in_transaction: bool = False) -> str:
+    def append_cash_entry(
+        self,
+        entry: CashEntry,
+        *,
+        fencing_token: int | None = None,
+        owner_id: str | None = None,
+        _in_transaction: bool = False,
+    ) -> str:
+        _require_fencing(
+            fencing_token=fencing_token,
+            owner_id=owner_id,
+            operation="append_cash_entry",
+            _in_transaction=_in_transaction,
+        )
         payload_hash = _cash_payload_hash(entry)
         existing = self.connection.execute(
             """
@@ -295,6 +393,13 @@ class PaperRepository:
         if not _in_transaction:
             self.connection.execute("BEGIN")
         try:
+            if not _in_transaction:
+                validate_fencing(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,  # type: ignore[arg-type]
+                    owner_id=owner_id,  # type: ignore[arg-type]
+                )
             self.connection.execute(
                 """
                 INSERT INTO paper_cash_ledger (
@@ -325,8 +430,19 @@ class PaperRepository:
         return entry.cash_entry_id
 
     def append_position_entry(
-        self, entry: PositionEntry, *, _in_transaction: bool = False
+        self,
+        entry: PositionEntry,
+        *,
+        fencing_token: int | None = None,
+        owner_id: str | None = None,
+        _in_transaction: bool = False,
     ) -> str:
+        _require_fencing(
+            fencing_token=fencing_token,
+            owner_id=owner_id,
+            operation="append_position_entry",
+            _in_transaction=_in_transaction,
+        )
         payload_hash = _position_payload_hash(entry)
         existing = self.connection.execute(
             """
@@ -368,6 +484,13 @@ class PaperRepository:
         if not _in_transaction:
             self.connection.execute("BEGIN")
         try:
+            if not _in_transaction:
+                validate_fencing(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,  # type: ignore[arg-type]
+                    owner_id=owner_id,  # type: ignore[arg-type]
+                )
             self.connection.execute(
                 """
                 INSERT INTO paper_position_ledger (
@@ -428,32 +551,60 @@ class PaperRepository:
         captured_inputs: list[RunInputCapture] | None = None,
     ) -> FrozenScreenRun:
         created_at = screen_run.created_at or datetime.now(tz=SHANGHAI)
+        payload_hash = _screen_run_payload_hash(screen_run)
         self.connection.execute("BEGIN")
         try:
-            self.connection.execute(
+            existing = self.connection.execute(
                 """
-                INSERT INTO frozen_screen_runs (
-                    screen_run_id, screen_content_hash, status, signal_time,
-                    target_portfolio_mode, target_weights_json, cash_weight,
-                    dataset_versions_json, event_dataset_versions_json,
-                    run_report_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (screen_run_id) DO NOTHING
+                SELECT screen_content_hash, status, signal_time, target_portfolio_mode,
+                       target_weights_json, cash_weight, dataset_versions_json,
+                       event_dataset_versions_json, run_report_json
+                FROM frozen_screen_runs
+                WHERE screen_run_id = ?
                 """,
-                [
-                    screen_run.screen_run_id,
-                    screen_run.screen_content_hash,
-                    screen_run.status,
-                    screen_run.signal_time,
-                    screen_run.target_portfolio_mode.value,
-                    screen_run.target_weights_json,
-                    screen_run.cash_weight,
-                    screen_run.dataset_versions_json,
-                    screen_run.event_dataset_versions_json,
-                    screen_run.run_report_json,
-                    created_at,
-                ],
-            )
+                [screen_run.screen_run_id],
+            ).fetchone()
+            if existing is not None:
+                existing_run = FrozenScreenRun(
+                    screen_run_id=screen_run.screen_run_id,
+                    screen_content_hash=existing[0],
+                    status=existing[1],
+                    signal_time=existing[2],
+                    target_portfolio_mode=existing[3],
+                    target_weights_json=existing[4],
+                    cash_weight=_decimal(existing[5]),
+                    dataset_versions_json=existing[6],
+                    event_dataset_versions_json=existing[7],
+                    run_report_json=existing[8],
+                )
+                if _screen_run_payload_hash(existing_run) != payload_hash:
+                    raise IdempotencyConflict(
+                        f"screen run conflict for {screen_run.screen_run_id}"
+                    )
+            else:
+                self.connection.execute(
+                    """
+                    INSERT INTO frozen_screen_runs (
+                        screen_run_id, screen_content_hash, status, signal_time,
+                        target_portfolio_mode, target_weights_json, cash_weight,
+                        dataset_versions_json, event_dataset_versions_json,
+                        run_report_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        screen_run.screen_run_id,
+                        screen_run.screen_content_hash,
+                        screen_run.status,
+                        screen_run.signal_time,
+                        screen_run.target_portfolio_mode.value,
+                        screen_run.target_weights_json,
+                        screen_run.cash_weight,
+                        screen_run.dataset_versions_json,
+                        screen_run.event_dataset_versions_json,
+                        screen_run.run_report_json,
+                        created_at,
+                    ],
+                )
             for item in captured_inputs or []:
                 self.capture_run_inputs(item, _in_transaction=True)
             self.connection.execute("COMMIT")
@@ -466,28 +617,51 @@ class PaperRepository:
         self, capture: RunInputCapture, *, _in_transaction: bool = False
     ) -> None:
         captured_at = datetime.now(tz=SHANGHAI)
+        payload_hash = _run_input_payload_hash(capture)
         if not _in_transaction:
             self.connection.execute("BEGIN")
         try:
-            self.connection.execute(
+            existing = self.connection.execute(
                 """
-                INSERT INTO paper_run_inputs (
-                    run_id, input_type, scope_key, row_content_hash, row_json,
-                    source_dataset_version_id, source_available_at, captured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_id, input_type, scope_key) DO NOTHING
+                SELECT row_content_hash, row_json, source_dataset_version_id, source_available_at
+                FROM paper_run_inputs
+                WHERE run_id = ? AND input_type = ? AND scope_key = ?
                 """,
-                [
-                    capture.run_id,
-                    capture.input_type,
-                    capture.scope_key,
-                    capture.row_content_hash,
-                    capture.row_json,
-                    capture.source_dataset_version_id,
-                    capture.source_available_at,
-                    captured_at,
-                ],
-            )
+                [capture.run_id, capture.input_type, capture.scope_key],
+            ).fetchone()
+            if existing is not None:
+                existing_capture = RunInputCapture(
+                    run_id=capture.run_id,
+                    input_type=capture.input_type,
+                    scope_key=capture.scope_key,
+                    row_content_hash=existing[0],
+                    row_json=existing[1],
+                    source_dataset_version_id=existing[2],
+                    source_available_at=existing[3],
+                )
+                if _run_input_payload_hash(existing_capture) != payload_hash:
+                    raise IdempotencyConflict(
+                        f"run input conflict for {capture.run_id}/{capture.scope_key}"
+                    )
+            else:
+                self.connection.execute(
+                    """
+                    INSERT INTO paper_run_inputs (
+                        run_id, input_type, scope_key, row_content_hash, row_json,
+                        source_dataset_version_id, source_available_at, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        capture.run_id,
+                        capture.input_type,
+                        capture.scope_key,
+                        capture.row_content_hash,
+                        capture.row_json,
+                        capture.source_dataset_version_id,
+                        capture.source_available_at,
+                        captured_at,
+                    ],
+                )
             if not _in_transaction:
                 self.connection.execute("COMMIT")
         except Exception:
@@ -497,47 +671,81 @@ class PaperRepository:
 
     def create_rebalance_revision(self, spec: RebalanceRevisionSpec) -> str:
         created_at = datetime.now(tz=SHANGHAI)
+        payload_hash = _rebalance_spec_payload_hash(spec)
         self.connection.execute("BEGIN")
         try:
-            self.connection.execute(
+            existing = self.connection.execute(
                 """
-                UPDATE rebalance_runs
-                SET is_active_revision = FALSE,
-                    active_revision_slot = revision
-                WHERE logical_run_key = ? AND is_active_revision = TRUE
+                SELECT account_id, screen_run_id, screen_content_hash, target_hash,
+                       signal_date, signal_time, execution_date, universe_hash,
+                       config_hash, strategy_version, target_weights_json,
+                       logical_run_key, revision, status
+                FROM rebalance_runs
+                WHERE rebalance_run_id = ?
                 """,
-                [spec.logical_run_key],
-            )
-            self.connection.execute(
-                """
-                INSERT INTO rebalance_runs (
-                    rebalance_run_id, account_id, screen_run_id, screen_content_hash,
-                    target_hash, signal_date, signal_time, execution_date,
-                    universe_hash, config_hash, strategy_version, target_weights_json,
-                    logical_run_key, revision, is_active_revision, active_revision_slot,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 0, ?, ?)
-                ON CONFLICT (rebalance_run_id) DO NOTHING
-                """,
-                [
-                    spec.rebalance_run_id,
-                    spec.account_id,
-                    spec.screen_run_id,
-                    spec.screen_content_hash,
-                    spec.target_hash,
-                    spec.signal_date,
-                    spec.signal_time,
-                    spec.execution_date,
-                    spec.universe_hash,
-                    spec.config_hash,
-                    spec.strategy_version,
-                    spec.target_weights_json,
-                    spec.logical_run_key,
-                    spec.revision,
-                    spec.status.value,
-                    created_at,
-                ],
-            )
+                [spec.rebalance_run_id],
+            ).fetchone()
+            if existing is not None:
+                existing_spec = RebalanceRevisionSpec(
+                    rebalance_run_id=spec.rebalance_run_id,
+                    account_id=existing[0],
+                    screen_run_id=existing[1],
+                    screen_content_hash=existing[2],
+                    target_hash=existing[3],
+                    signal_date=existing[4],
+                    signal_time=existing[5],
+                    execution_date=existing[6],
+                    universe_hash=existing[7],
+                    config_hash=existing[8],
+                    strategy_version=existing[9],
+                    target_weights_json=existing[10],
+                    logical_run_key=existing[11],
+                    revision=int(existing[12]),
+                    status=RunStatus(existing[13]),
+                )
+                if _rebalance_spec_payload_hash(existing_spec) != payload_hash:
+                    raise IdempotencyConflict(
+                        f"rebalance revision conflict for {spec.rebalance_run_id}"
+                    )
+            else:
+                self.connection.execute(
+                    """
+                    UPDATE rebalance_runs
+                    SET is_active_revision = FALSE,
+                        active_revision_slot = revision
+                    WHERE logical_run_key = ? AND is_active_revision = TRUE
+                    """,
+                    [spec.logical_run_key],
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO rebalance_runs (
+                        rebalance_run_id, account_id, screen_run_id, screen_content_hash,
+                        target_hash, signal_date, signal_time, execution_date,
+                        universe_hash, config_hash, strategy_version, target_weights_json,
+                        logical_run_key, revision, is_active_revision, active_revision_slot,
+                        status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 0, ?, ?)
+                    """,
+                    [
+                        spec.rebalance_run_id,
+                        spec.account_id,
+                        spec.screen_run_id,
+                        spec.screen_content_hash,
+                        spec.target_hash,
+                        spec.signal_date,
+                        spec.signal_time,
+                        spec.execution_date,
+                        spec.universe_hash,
+                        spec.config_hash,
+                        spec.strategy_version,
+                        spec.target_weights_json,
+                        spec.logical_run_key,
+                        spec.revision,
+                        spec.status.value,
+                        created_at,
+                    ],
+                )
             self.connection.execute("COMMIT")
         except Exception:
             self.connection.execute("ROLLBACK")
@@ -552,6 +760,40 @@ class PaperRepository:
         self.connection.execute("BEGIN")
         try:
             for order in orders:
+                payload_hash = _order_payload_hash(order)
+                existing = self.connection.execute(
+                    """
+                    SELECT rebalance_run_id, account_id, symbol, side,
+                           planned_quantity, filled_quantity, remaining_quantity,
+                           reference_price_cny, limit_price_cny, status,
+                           rejection_code, rejection_detail
+                    FROM paper_orders
+                    WHERE order_id = ?
+                    """,
+                    [order.order_id],
+                ).fetchone()
+                if existing is not None:
+                    existing_order = PaperOrder(
+                        order_id=order.order_id,
+                        rebalance_run_id=existing[0],
+                        account_id=existing[1],
+                        symbol=existing[2],
+                        side=OrderSide(existing[3]),
+                        planned_quantity=int(existing[4]),
+                        filled_quantity=int(existing[5]),
+                        remaining_quantity=int(existing[6]),
+                        reference_price_cny=_decimal(existing[7]),
+                        limit_price_cny=_decimal(existing[8]) if existing[8] is not None else None,
+                        status=OrderStatus(existing[9]),
+                        rejection_code=existing[10],
+                        rejection_detail=existing[11],
+                    )
+                    if _order_payload_hash(existing_order) != payload_hash:
+                        raise IdempotencyConflict(
+                            f"order conflict for {order.order_id}"
+                        )
+                    inserted.append(order.order_id)
+                    continue
                 created_at = order.created_at or now
                 updated_at = order.updated_at or now
                 self.connection.execute(
@@ -562,7 +804,6 @@ class PaperRepository:
                         reference_price_cny, limit_price_cny, status,
                         rejection_code, rejection_detail, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (order_id) DO NOTHING
                     """,
                     [
                         order.order_id,
@@ -675,16 +916,18 @@ class PaperRepository:
         fencing_token: int,
         fault_injection: dict[str, FaultHook] | None = None,
     ) -> list[str]:
-        validate_fencing(
-            self.connection,
-            account_id=batch.account_id,
-            fencing_token=fencing_token,
-            owner_id=batch.owner_id,
-        )
         fill_ids: list[str] = []
         hooks = fault_injection or {}
         self.connection.execute("BEGIN")
         try:
+            if "before_validate" in hooks:
+                hooks["before_validate"]()
+            validate_fencing(
+                self.connection,
+                account_id=batch.account_id,
+                fencing_token=fencing_token,
+                owner_id=batch.owner_id,
+            )
             for fill in batch.fills:
                 if fill.account_id != batch.account_id:
                     raise InvalidExecutionBatch("fill account_id mismatch")
@@ -742,31 +985,37 @@ class PaperRepository:
                     )
                     fill_ids.append(fill.fill_id)
                     self._apply_fill_ledger_effects(batch, fill, side)
-                if "after_fill" in hooks:
-                    hooks["after_fill"]()
+                    if "after_fill" in hooks:
+                        hooks["after_fill"]()
 
-                new_filled = filled_qty + fill.quantity
-                new_remaining = max(planned_qty - new_filled, 0)
-                new_status = OrderStatus.FILLED if new_remaining == 0 else OrderStatus.PARTIALLY_FILLED
-                if fill.quantity == 0:
-                    new_status = OrderStatus(status)
-                self.connection.execute(
-                    """
-                    UPDATE paper_orders
-                    SET filled_quantity = ?,
-                        remaining_quantity = ?,
-                        status = ?,
-                        updated_at = ?
-                    WHERE order_id = ?
-                    """,
-                    [
-                        new_filled,
-                        new_remaining,
-                        new_status.value,
-                        datetime.now(tz=SHANGHAI),
-                        fill.order_id,
-                    ],
-                )
+                    new_filled = filled_qty + fill.quantity
+                    new_remaining = max(planned_qty - new_filled, 0)
+                    new_status = (
+                        OrderStatus.FILLED
+                        if new_remaining == 0
+                        else OrderStatus.PARTIALLY_FILLED
+                    )
+                    if fill.quantity == 0:
+                        new_status = OrderStatus(status)
+                    self.connection.execute(
+                        """
+                        UPDATE paper_orders
+                        SET filled_quantity = ?,
+                            remaining_quantity = ?,
+                            status = ?,
+                            updated_at = ?
+                        WHERE order_id = ?
+                        """,
+                        [
+                            new_filled,
+                            new_remaining,
+                            new_status.value,
+                            datetime.now(tz=SHANGHAI),
+                            fill.order_id,
+                        ],
+                    )
+                else:
+                    fill_ids.append(str(existing_fill[0]))
 
             if "after_cash" in hooks:
                 hooks["after_cash"]()
@@ -1208,39 +1457,69 @@ class PaperRepository:
                 ],
             )
 
-    def rebuild_account_projection(self, account_id: str, *, as_of_date: date | None = None) -> AccountProjection:
+    def rebuild_account_projection(
+        self,
+        account_id: str,
+        *,
+        as_of_date: date | None = None,
+        fencing_token: int | None = None,
+        owner_id: str | None = None,
+        _in_transaction: bool = False,
+    ) -> AccountProjection:
+        _require_fencing(
+            fencing_token=fencing_token,
+            owner_id=owner_id,
+            operation="rebuild_account_projection",
+            _in_transaction=_in_transaction,
+        )
         as_of = as_of_date or datetime.now(tz=SHANGHAI).date()
-        self._rebuild_positions_projection(account_id, as_of)
-        cash_row = self.connection.execute(
-            """
-            SELECT COALESCE(SUM(amount_cny), 0)
-            FROM paper_cash_ledger
-            WHERE account_id = ?
-            """,
-            [account_id],
-        ).fetchone()
-        cash_cny = money(_decimal(cash_row[0]))
-        rows = self.connection.execute(
-            """
-            SELECT symbol, quantity, available_quantity, average_cost_cny,
-                   market_value_cny, last_price_cny
-            FROM paper_positions
-            WHERE account_id = ?
-            ORDER BY symbol
-            """,
-            [account_id],
-        ).fetchall()
-        positions = {
-            row[0]: PositionProjection(
-                symbol=row[0],
-                quantity=int(row[1]),
-                available_quantity=int(row[2]),
-                average_cost_cny=money(_decimal(row[3])),
-                market_value_cny=money(_decimal(row[4])),
-                last_price_cny=money(_decimal(row[5])) if row[5] is not None else None,
-            )
-            for row in rows
-        }
+        if not _in_transaction:
+            self.connection.execute("BEGIN")
+        try:
+            if not _in_transaction:
+                validate_fencing(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,  # type: ignore[arg-type]
+                    owner_id=owner_id,  # type: ignore[arg-type]
+                )
+            self._rebuild_positions_projection(account_id, as_of)
+            cash_row = self.connection.execute(
+                """
+                SELECT COALESCE(SUM(amount_cny), 0)
+                FROM paper_cash_ledger
+                WHERE account_id = ?
+                """,
+                [account_id],
+            ).fetchone()
+            cash_cny = money(_decimal(cash_row[0]))
+            rows = self.connection.execute(
+                """
+                SELECT symbol, quantity, available_quantity, average_cost_cny,
+                       market_value_cny, last_price_cny
+                FROM paper_positions
+                WHERE account_id = ?
+                ORDER BY symbol
+                """,
+                [account_id],
+            ).fetchall()
+            positions = {
+                row[0]: PositionProjection(
+                    symbol=row[0],
+                    quantity=int(row[1]),
+                    available_quantity=int(row[2]),
+                    average_cost_cny=money(_decimal(row[3])),
+                    market_value_cny=money(_decimal(row[4])),
+                    last_price_cny=money(_decimal(row[5])) if row[5] is not None else None,
+                )
+                for row in rows
+            }
+            if not _in_transaction:
+                self.connection.execute("COMMIT")
+        except Exception:
+            if not _in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
         return AccountProjection(
             account_id=account_id,
             cash_cny=cash_cny,
@@ -1268,7 +1547,11 @@ class PaperRepository:
             created_at=row[5],
             updated_at=row[6],
         )
-        projection = self.rebuild_account_projection(account_id, as_of_date=as_of_date)
+        projection = self.rebuild_account_projection(
+            account_id,
+            as_of_date=as_of_date,
+            _in_transaction=True,
+        )
         return AccountSnapshot(
             account=account,
             cash_cny=projection.cash_cny,

@@ -72,6 +72,137 @@ def make_execution_batch(
 EXECUTION_BATCH = make_execution_batch()
 
 
+def acquire_test_lease(
+    repo: PaperRepository,
+    account_id: str = "demo",
+    owner_id: str = "test",
+):
+    return repo.acquire_account_lease(account_id, owner_id=owner_id)
+
+
+def append_cash_with_lease(repo: PaperRepository, entry: CashEntry, owner_id: str = "test") -> str:
+    lease = acquire_test_lease(repo, entry.account_id, owner_id=owner_id)
+    return repo.append_cash_entry(
+        entry,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+
+
+def append_position_with_lease(
+    repo: PaperRepository, entry: PositionEntry, owner_id: str = "test"
+) -> str:
+    lease = acquire_test_lease(repo, entry.account_id, owner_id=owner_id)
+    return repo.append_position_entry(
+        entry,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+
+
+def rebuild_projection_with_lease(
+    repo: PaperRepository,
+    account_id: str = "demo",
+    *,
+    as_of_date=TRADE_DATE,
+    owner_id: str = "test",
+):
+    lease = acquire_test_lease(repo, account_id, owner_id=owner_id)
+    return repo.rebuild_account_projection(
+        account_id,
+        as_of_date=as_of_date,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+
+
+def make_partial_execution_batch(
+    *,
+    account_id: str = "demo",
+    owner_id: str = "executor",
+    order_id: str = "ord-buy-600000",
+    fill_id: str = "fill-partial-1",
+    quantity: int = 1000,
+    rebalance_run_id: str = "reb-1",
+) -> ExecutionBatch:
+    return ExecutionBatch(
+        account_id=account_id,
+        rebalance_run_id=rebalance_run_id,
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        owner_id=owner_id,
+        fills=[
+            FillSpec(
+                fill_id=fill_id,
+                order_id=order_id,
+                account_id=account_id,
+                symbol="600000",
+                quantity=quantity,
+                price_cny=Decimal("10.00"),
+                commission_cny=Decimal("5.00"),
+            )
+        ],
+    )
+
+
+def seed_partial_execution_orders(
+    repo: PaperRepository,
+    *,
+    planned_quantity: int = 2000,
+    account_id: str = "demo",
+    owner_id: str = "executor",
+    rebalance_run_id: str = "reb-1",
+    order_id: str = "ord-buy-600000",
+) -> None:
+    seed_demo_account(repo, account_id=account_id)
+    repo.freeze_screen_run(
+        FrozenScreenRun(
+            screen_run_id="screen-1",
+            screen_content_hash="hash-screen-1",
+            status="OK",
+            signal_time=SIGNAL_TIME,
+            target_portfolio_mode=TargetPortfolioMode.WEIGHTS,
+            target_weights_json='{"600000": 0.1}',
+            cash_weight=Decimal("0.9"),
+            run_report_json="{}",
+        )
+    )
+    repo.create_rebalance_revision(
+        RebalanceRevisionSpec(
+            rebalance_run_id=rebalance_run_id,
+            account_id=account_id,
+            screen_run_id="screen-1",
+            screen_content_hash="hash-screen-1",
+            target_hash="hash-target-1",
+            signal_date=SIGNAL_TIME.date(),
+            signal_time=SIGNAL_TIME,
+            execution_date=TRADE_DATE,
+            universe_hash="uni-1",
+            config_hash="cfg-1",
+            strategy_version="v1",
+            target_weights_json='{"600000": 0.1}',
+            logical_run_key=f"{account_id}:{TRADE_DATE}:uni-1",
+            revision=1,
+            status=RunStatus.PENDING,
+        )
+    )
+    repo.insert_orders(
+        [
+            PaperOrder(
+                order_id=order_id,
+                rebalance_run_id=rebalance_run_id,
+                account_id=account_id,
+                symbol="600000",
+                side=OrderSide.BUY,
+                planned_quantity=planned_quantity,
+                remaining_quantity=planned_quantity,
+                reference_price_cny=Decimal("10.00"),
+                status=OrderStatus.PENDING,
+            )
+        ]
+    )
+
+
 def seed_demo_account(repo: PaperRepository, *, account_id: str = "demo") -> None:
     repo.create_account(account_id, Decimal("1000000.00"))
 

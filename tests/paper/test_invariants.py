@@ -8,7 +8,15 @@ from decimal import Decimal
 import pytest
 
 from tradingagents.paper.invariants import InvariantViolation, assert_account_invariants
-from tests.paper.conftest import TRADE_DATE, cash_entry, position_entry, seed_execution_orders
+from tests.paper.conftest import (
+    TRADE_DATE,
+    append_cash_with_lease,
+    append_position_with_lease,
+    cash_entry,
+    position_entry,
+    rebuild_projection_with_lease,
+    seed_execution_orders,
+)
 
 
 def test_assert_account_invariants_passes_for_seeded_account(repo):
@@ -18,9 +26,9 @@ def test_assert_account_invariants_passes_for_seeded_account(repo):
 
 def test_assert_account_invariants_passes_after_projection_seed(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    repo.append_cash_entry(cash_entry())
-    repo.append_position_entry(position_entry())
-    repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
+    append_cash_with_lease(repo, cash_entry())
+    append_position_with_lease(repo, position_entry())
+    rebuild_projection_with_lease(repo, "demo")
     assert_account_invariants(repo.connection, "demo", as_of_date=TRADE_DATE)
 
 
@@ -50,7 +58,7 @@ def test_negative_cash_raises(repo):
 
 def test_lot_ledger_mismatch_raises(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    repo.append_position_entry(position_entry())
+    append_position_with_lease(repo, position_entry())
     repo.connection.execute(
         "UPDATE paper_lots SET remaining_quantity = 0 WHERE account_id = ?",
         ["demo"],

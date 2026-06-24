@@ -100,6 +100,51 @@ class _AccountFileLock:
             self._handle = None
 
 
+def _grant_account_lease(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    account_id: str,
+    owner_id: str,
+    lease_seconds: int,
+) -> AccountLease:
+    _ensure_lock_row(connection, account_id)
+    token, _, _, _, _ = _read_lock_row(connection, account_id)
+    now = datetime.now(tz=SHANGHAI)
+    new_token = token + 1
+    acquired_at = now
+    lease_until = now + timedelta(seconds=lease_seconds)
+    owner_pid = os.getpid()
+    connection.execute(
+        """
+        UPDATE paper_account_locks
+        SET current_fencing_token = ?,
+            owner_id = ?,
+            owner_pid = ?,
+            acquired_at = ?,
+            lease_until = ?,
+            updated_at = ?
+        WHERE account_id = ?
+        """,
+        [
+            new_token,
+            owner_id,
+            owner_pid,
+            acquired_at,
+            lease_until,
+            now,
+            account_id,
+        ],
+    )
+    return AccountLease(
+        account_id=account_id,
+        token=new_token,
+        owner_id=owner_id,
+        owner_pid=owner_pid,
+        acquired_at=acquired_at,
+        lease_until=lease_until,
+    )
+
+
 def acquire_account_lease(
     connection: duckdb.DuckDBPyConnection,
     *,
@@ -112,7 +157,7 @@ def acquire_account_lease(
     lock_file = _lock_path(home_dir, account_id)
     with _AccountFileLock(lock_file, lock_timeout_seconds):
         _ensure_lock_row(connection, account_id)
-        token, owner_id_existing, _, _, lease_until = _read_lock_row(connection, account_id)
+        _, owner_id_existing, _, _, lease_until = _read_lock_row(connection, account_id)
         now = datetime.now(tz=SHANGHAI)
         if (
             owner_id_existing is not None
@@ -123,38 +168,11 @@ def acquire_account_lease(
             raise LeaseConflict(
                 f"account {account_id} leased by {owner_id_existing} until {lease_until}"
             )
-        new_token = token + 1
-        acquired_at = now
-        lease_until = now + timedelta(seconds=lease_seconds)
-        owner_pid = os.getpid()
-        connection.execute(
-            """
-            UPDATE paper_account_locks
-            SET current_fencing_token = ?,
-                owner_id = ?,
-                owner_pid = ?,
-                acquired_at = ?,
-                lease_until = ?,
-                updated_at = ?
-            WHERE account_id = ?
-            """,
-            [
-                new_token,
-                owner_id,
-                owner_pid,
-                acquired_at,
-                lease_until,
-                now,
-                account_id,
-            ],
-        )
-        return AccountLease(
+        return _grant_account_lease(
+            connection,
             account_id=account_id,
-            token=new_token,
             owner_id=owner_id,
-            owner_pid=owner_pid,
-            acquired_at=acquired_at,
-            lease_until=lease_until,
+            lease_seconds=lease_seconds,
         )
 
 
@@ -175,13 +193,11 @@ def take_over_expired_lease(
         )
         now = datetime.now(tz=SHANGHAI)
         if owner_id_existing is None or lease_until is None:
-            return acquire_account_lease(
+            return _grant_account_lease(
                 connection,
-                home_dir=home_dir,
                 account_id=account_id,
                 owner_id=owner_id,
                 lease_seconds=lease_seconds,
-                lock_timeout_seconds=lock_timeout_seconds,
             )
         if lease_until > now and owner_id_existing == owner_id:
             return AccountLease(
@@ -196,38 +212,11 @@ def take_over_expired_lease(
             raise LeaseConflict(
                 f"account {account_id} still leased by {owner_id_existing} until {lease_until}"
             )
-        new_token = token + 1
-        acquired_at = now
-        lease_until = now + timedelta(seconds=lease_seconds)
-        owner_pid = os.getpid()
-        connection.execute(
-            """
-            UPDATE paper_account_locks
-            SET current_fencing_token = ?,
-                owner_id = ?,
-                owner_pid = ?,
-                acquired_at = ?,
-                lease_until = ?,
-                updated_at = ?
-            WHERE account_id = ?
-            """,
-            [
-                new_token,
-                owner_id,
-                owner_pid,
-                acquired_at,
-                lease_until,
-                now,
-                account_id,
-            ],
-        )
-        return AccountLease(
+        return _grant_account_lease(
+            connection,
             account_id=account_id,
-            token=new_token,
             owner_id=owner_id,
-            owner_pid=owner_pid,
-            acquired_at=acquired_at,
-            lease_until=lease_until,
+            lease_seconds=lease_seconds,
         )
 
 

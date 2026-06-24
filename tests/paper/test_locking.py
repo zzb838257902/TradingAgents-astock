@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import fcntl
+import os
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from tradingagents.paper.exceptions import LeaseConflict, LeaseTimeout, StaleFencingToken
 from tradingagents.paper.locking import _lock_path
+from tradingagents.paper.migrations import SHANGHAI
 from tradingagents.paper.repository import PaperRepository
 from tests.paper.conftest import EXECUTION_BATCH, seed_execution_orders
 
@@ -71,6 +74,55 @@ def test_expired_lease_can_be_taken_over(repo):
     second = repo.take_over_expired_lease("demo", owner_id="two", lease_seconds=300)
     assert second.token > first.token
     assert second.owner_id == "two"
+
+
+def test_first_takeover_on_new_account_succeeds(repo):
+    repo.create_account("acct", Decimal("100000.00"))
+    lease = repo.take_over_expired_lease("acct", owner_id="owner-1")
+    assert lease.token == 1
+    assert lease.owner_id == "owner-1"
+
+
+def test_stale_token_rejected_inside_transaction(repo):
+    seed_execution_orders(repo)
+    first = repo.acquire_account_lease("demo", owner_id="one")
+    other = PaperRepository(repo.paths)
+
+    def takeover_during_transaction() -> None:
+        now = datetime.now(tz=SHANGHAI)
+        other.connection.execute(
+            """
+            UPDATE paper_account_locks
+            SET current_fencing_token = ?,
+                owner_id = ?,
+                owner_pid = ?,
+                acquired_at = ?,
+                lease_until = ?,
+                updated_at = ?
+            WHERE account_id = ?
+            """,
+            [
+                first.token + 1,
+                "two",
+                os.getpid(),
+                now,
+                now + timedelta(seconds=300),
+                now,
+                "demo",
+            ],
+        )
+
+    try:
+        with pytest.raises(StaleFencingToken):
+            repo.apply_execution_batch(
+                EXECUTION_BATCH,
+                fencing_token=first.token,
+                fault_injection={"before_validate": takeover_during_transaction},
+            )
+        fills = other.connection.execute("SELECT COUNT(*) FROM paper_fills").fetchone()
+        assert int(fills[0]) == 0
+    finally:
+        other.close()
 
 
 def test_stale_token_rejected_on_money_impact(repo):

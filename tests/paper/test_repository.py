@@ -8,16 +8,23 @@ from decimal import Decimal
 import pytest
 
 from tradingagents.paper.config import PaperPaths
-from tradingagents.paper.exceptions import IdempotencyConflict, StaleFencingToken
+from tradingagents.paper.contracts import FrozenScreenRun, TargetPortfolioMode
+from tradingagents.paper.exceptions import IdempotencyConflict, LeaseNotHeld, StaleFencingToken
 from tradingagents.paper.invariants import assert_account_invariants
 from tradingagents.paper.repository import ValuationWriteSpec
 from tests.paper.conftest import (
     EXECUTION_BATCH,
+    SIGNAL_TIME,
     TRADE_DATE,
+    append_cash_with_lease,
+    append_position_with_lease,
     cash_entry,
     make_execution_batch,
+    make_partial_execution_batch,
     position_entry,
+    rebuild_projection_with_lease,
     seed_execution_orders,
+    seed_partial_execution_orders,
 )
 
 
@@ -52,20 +59,38 @@ def test_create_account_appends_initial_cash_idempotently(repo):
 
 def test_cash_and_position_projection_rebuild_from_ledgers(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    repo.append_cash_entry(cash_entry())
-    repo.append_position_entry(position_entry())
-    rebuilt = repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
+    append_cash_with_lease(repo, cash_entry())
+    append_position_with_lease(repo, position_entry())
+    rebuilt = rebuild_projection_with_lease(repo, "demo")
     assert rebuilt.cash_cny == Decimal("1000000.00")
     assert rebuilt.positions["600000"].quantity == 1000
 
 
+def test_append_cash_without_fencing_raises(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    with pytest.raises(LeaseNotHeld):
+        repo.append_cash_entry(cash_entry(entry_id="cash-x", component="BONUS", source_id="x"))
+
+
+def test_append_position_without_fencing_raises(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    with pytest.raises(LeaseNotHeld):
+        repo.append_position_entry(position_entry(entry_id="pos-x"))
+
+
+def test_rebuild_projection_without_fencing_raises(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    with pytest.raises(LeaseNotHeld):
+        repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
+
+
 def test_duplicate_business_key_same_payload_is_idempotent(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    first = repo.append_cash_entry(
-        cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00"))
-    )
-    second = repo.append_cash_entry(
-        cash_entry(entry_id="cash-b", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00"))
+    entry = cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00"))
+    first = append_cash_with_lease(repo, entry)
+    second = append_cash_with_lease(
+        repo,
+        cash_entry(entry_id="cash-b", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00")),
     )
     assert first == second
     count = repo.connection.execute(
@@ -80,12 +105,14 @@ def test_duplicate_business_key_same_payload_is_idempotent(repo):
 
 def test_duplicate_business_key_different_payload_raises(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    repo.append_cash_entry(
-        cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00"))
+    append_cash_with_lease(
+        repo,
+        cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00")),
     )
     with pytest.raises(IdempotencyConflict):
-        repo.append_cash_entry(
-            cash_entry(entry_id="cash-b", component="BONUS", source_id="promo-1", amount_cny=Decimal("200.00"))
+        append_cash_with_lease(
+            repo,
+            cash_entry(entry_id="cash-b", component="BONUS", source_id="promo-1", amount_cny=Decimal("200.00")),
         )
 
 
@@ -110,7 +137,12 @@ def test_apply_execution_batch_updates_orders_positions_and_cash(repo):
     orders = repo.list_orders("demo")
     assert orders[0].status.value == "FILLED"
     assert orders[0].filled_quantity == 1000
-    projection = repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
+    projection = repo.rebuild_account_projection(
+        "demo",
+        as_of_date=TRADE_DATE,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
     assert projection.positions["600000"].quantity == 1000
     assert projection.cash_cny == Decimal("989995.00")
     assert_account_invariants(repo.connection, "demo", as_of_date=TRADE_DATE)
@@ -121,9 +153,38 @@ def test_apply_execution_batch_is_idempotent(repo):
     lease = repo.acquire_account_lease("demo", owner_id="executor")
     repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
     before = repo.count_rows()
+    orders_before = repo.list_orders("demo")
     repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
     after = repo.count_rows()
+    orders_after = repo.list_orders("demo")
     assert after == before
+    assert orders_after[0].filled_quantity == orders_before[0].filled_quantity == 1000
+    assert orders_after[0].remaining_quantity == orders_before[0].remaining_quantity == 0
+    assert orders_after[0].status == orders_before[0].status
+
+
+def test_partial_fill_rerun_preserves_order_state(repo):
+    seed_partial_execution_orders(repo, planned_quantity=2000)
+    batch = make_partial_execution_batch(quantity=1000)
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.apply_execution_batch(batch, fencing_token=lease.token)
+    repo.apply_execution_batch(batch, fencing_token=lease.token)
+    order = repo.list_orders("demo")[0]
+    assert order.filled_quantity == 1000
+    assert order.remaining_quantity == 1000
+    assert order.status.value == "PARTIALLY_FILLED"
+    fill_count = repo.connection.execute(
+        "SELECT COALESCE(SUM(quantity), 0) FROM paper_fills WHERE order_id = ?",
+        ["ord-buy-600000"],
+    ).fetchone()
+    assert int(fill_count[0]) == 1000
+    projection = repo.rebuild_account_projection(
+        "demo",
+        as_of_date=TRADE_DATE,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+    assert projection.positions["600000"].quantity == 1000
 
 
 def test_fault_injection_after_fill_rolls_back(repo):
@@ -196,3 +257,28 @@ def test_apply_corporate_action_stub(repo):
         )
     )
     assert key == "demo:ca-div-1:1"
+
+
+def test_freeze_screen_run_conflict_raises(repo):
+    run = FrozenScreenRun(
+        screen_run_id="screen-x",
+        screen_content_hash="hash-a",
+        status="OK",
+        signal_time=SIGNAL_TIME,
+        target_portfolio_mode=TargetPortfolioMode.WEIGHTS,
+        target_weights_json="{}",
+        cash_weight=Decimal("1.0"),
+        run_report_json="{}",
+    )
+    repo.freeze_screen_run(run)
+    conflicting = run.model_copy(update={"screen_content_hash": "hash-b"})
+    with pytest.raises(IdempotencyConflict):
+        repo.freeze_screen_run(conflicting)
+
+
+def test_insert_orders_conflict_raises(repo):
+    seed_execution_orders(repo)
+    orders = repo.list_orders("demo")
+    conflicting = orders[0].model_copy(update={"planned_quantity": 2000})
+    with pytest.raises(IdempotencyConflict):
+        repo.insert_orders([conflicting])
