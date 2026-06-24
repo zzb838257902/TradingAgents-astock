@@ -19,6 +19,7 @@ from tradingagents.paper.contracts import (
     PositionSourceType,
     money,
 )
+from tradingagents.paper.exceptions import IdempotencyConflict
 from tradingagents.paper.repository import CorporateActionApplicationSpec, PaperRepository
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -39,6 +40,8 @@ def entitlement_source_hash(
     account_id: str,
     action: CorporateActionRecord,
     entitlement_quantity: int,
+    *,
+    revision: int = 1,
 ) -> str:
     payload = {
         "account_id": account_id,
@@ -47,6 +50,10 @@ def entitlement_source_hash(
         "record_date": action.record_date.isoformat() if action.record_date else None,
         "entitlement_quantity": entitlement_quantity,
         "source_version": action.source_version,
+        "cash_div": action.cash_div,
+        "stock_div": action.stock_div,
+        "split_ratio": action.split_ratio,
+        "revision": revision,
     }
     encoded = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -70,19 +77,6 @@ class CorporateActionProcessor:
         *,
         revision: int = 1,
     ) -> CorporateActionApplicationResult:
-        existing = self.paper_repo.get_active_corporate_action_application(
-            self.account_id,
-            action.corporate_action_id,
-        )
-        if existing is not None and existing["status"] == CorporateActionApplicationStatus.APPLIED.value:
-            return CorporateActionApplicationResult(
-                corporate_action_id=action.corporate_action_id,
-                application_key=f"{self.account_id}:{action.corporate_action_id}:{existing['revision']}",
-                status=CorporateActionApplicationStatus.APPLIED,
-                entitlement_quantity=int(existing["entitlement_quantity"]),
-                revision=int(existing["revision"]),
-            )
-
         if action.record_date is None:
             return self._record_manual(action, entitlement_quantity=0, revision=revision)
 
@@ -93,6 +87,47 @@ class CorporateActionProcessor:
         )
         if entitlement <= 0:
             return self._record_manual(action, entitlement_quantity=0, revision=revision)
+
+        content_hash = entitlement_source_hash(
+            self.account_id, action, entitlement, revision=revision
+        )
+        existing = self.paper_repo.get_active_corporate_action_application(
+            self.account_id,
+            action.corporate_action_id,
+        )
+        if existing is not None:
+            existing_revision = int(existing["revision"])
+            if (
+                existing_revision == revision
+                and existing["entitlement_source_hash"] == content_hash
+            ):
+                return CorporateActionApplicationResult(
+                    corporate_action_id=action.corporate_action_id,
+                    application_key=(
+                        f"{self.account_id}:{action.corporate_action_id}:{existing_revision}"
+                    ),
+                    status=CorporateActionApplicationStatus(existing["status"]),
+                    entitlement_quantity=int(existing["entitlement_quantity"]),
+                    revision=existing_revision,
+                )
+            if existing_revision == revision:
+                raise IdempotencyConflict(
+                    f"corporate action conflict for {action.corporate_action_id} revision {revision}"
+                )
+            if revision < existing_revision:
+                raise IdempotencyConflict(
+                    f"corporate action revision {revision} superseded by {existing_revision}"
+                )
+            if existing["status"] == CorporateActionApplicationStatus.APPLIED.value:
+                if action.action_type == "cash_div":
+                    return self._apply_cash_dividend_revision(
+                        action, entitlement, revision=revision
+                    )
+                return self._record_manual(
+                    action,
+                    entitlement_quantity=entitlement,
+                    revision=revision,
+                )
 
         if action.action_type == "cash_div":
             return self._apply_cash_dividend(action, entitlement, revision=revision)
@@ -132,7 +167,61 @@ class CorporateActionProcessor:
                 revision=revision,
                 entitlement_quantity=entitlement,
                 entitlement_source_hash=entitlement_source_hash(
-                    self.account_id, action, entitlement
+                    self.account_id, action, entitlement, revision=revision
+                ),
+                status=CorporateActionApplicationStatus.APPLIED,
+            ),
+            fencing_token=lease.token,
+            owner_id=lease.owner_id,
+            cash_entry=cash_entry,
+            effective_date=action.pay_date,
+        )
+        return CorporateActionApplicationResult(
+            corporate_action_id=action.corporate_action_id,
+            application_key=application_key,
+            status=CorporateActionApplicationStatus.APPLIED,
+            entitlement_quantity=entitlement,
+            revision=revision,
+        )
+
+    def _apply_cash_dividend_revision(
+        self,
+        action: CorporateActionRecord,
+        entitlement: int,
+        *,
+        revision: int,
+    ) -> CorporateActionApplicationResult:
+        if action.pay_date is None or action.cash_div is None:
+            return self._record_manual(action, entitlement_quantity=entitlement, revision=revision)
+
+        new_total = money(Decimal(str(action.cash_div)) * Decimal(entitlement))
+        prior_paid = self.paper_repo.corporate_action_cash_total(
+            self.account_id,
+            action.corporate_action_id,
+        )
+        delta = money(new_total - prior_paid)
+        occurred_at = datetime.combine(action.pay_date, time(9, 0), tzinfo=SHANGHAI)
+        cash_entry = None
+        if delta != 0:
+            cash_entry = CashEntry(
+                cash_entry_id=f"cash-{action.corporate_action_id}-rev-{revision}",
+                account_id=self.account_id,
+                entry_type=CashEntryType.ADJUSTMENT,
+                amount_cny=delta,
+                source_type="CORPORATE_ACTION",
+                source_id=action.corporate_action_id,
+                component=f"REVISION_{revision}",
+                occurred_at=occurred_at,
+            )
+        lease = self.paper_repo.acquire_account_lease(self.account_id, owner_id=self.owner_id)
+        application_key = self.paper_repo.apply_corporate_action(
+            CorporateActionApplicationSpec(
+                account_id=self.account_id,
+                corporate_action_id=action.corporate_action_id,
+                revision=revision,
+                entitlement_quantity=entitlement,
+                entitlement_source_hash=entitlement_source_hash(
+                    self.account_id, action, entitlement, revision=revision
                 ),
                 status=CorporateActionApplicationStatus.APPLIED,
             ),
@@ -232,7 +321,7 @@ class CorporateActionProcessor:
                 revision=revision,
                 entitlement_quantity=entitlement,
                 entitlement_source_hash=entitlement_source_hash(
-                    self.account_id, action, entitlement
+                    self.account_id, action, entitlement, revision=revision
                 ),
                 status=CorporateActionApplicationStatus.APPLIED,
             ),
@@ -266,7 +355,7 @@ class CorporateActionProcessor:
                 revision=revision,
                 entitlement_quantity=entitlement_quantity,
                 entitlement_source_hash=entitlement_source_hash(
-                    self.account_id, action, entitlement_quantity
+                    self.account_id, action, entitlement_quantity, revision=revision
                 ),
                 status=CorporateActionApplicationStatus.NEEDS_MANUAL_ACTION,
             ),

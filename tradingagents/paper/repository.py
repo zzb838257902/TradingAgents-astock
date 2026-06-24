@@ -1293,26 +1293,8 @@ class PaperRepository:
                 has_rejections = False
                 has_partial = False
                 for rejection in batch.rejections:
-                    self.connection.execute(
-                        """
-                        UPDATE paper_orders
-                        SET status = ?,
-                            rejection_code = ?,
-                            rejection_detail = ?,
-                            updated_at = ?
-                        WHERE order_id = ? AND account_id = ? AND status = ?
-                        """,
-                        [
-                            OrderStatus.REJECTED.value,
-                            rejection.rejection_code,
-                            rejection.rejection_detail,
-                            now,
-                            rejection.order_id,
-                            batch.account_id,
-                            OrderStatus.PENDING.value,
-                        ],
-                    )
-                    has_rejections = True
+                    if self._apply_order_rejection_in_tx(batch, rejection, now):
+                        has_rejections = True
 
                 partial_rows = self.connection.execute(
                     """
@@ -1366,6 +1348,81 @@ class PaperRepository:
                 self.connection.execute("ROLLBACK")
                 raise
         return fill_ids
+
+    def _apply_order_rejection_in_tx(
+        self,
+        batch: ExecutionBatch,
+        rejection: OrderRejectionSpec,
+        now: datetime,
+    ) -> bool:
+        order_row = self.connection.execute(
+            """
+            SELECT status, rejection_code, rejection_detail, rebalance_run_id
+            FROM paper_orders
+            WHERE order_id = ? AND account_id = ?
+            """,
+            [rejection.order_id, batch.account_id],
+        ).fetchone()
+        if order_row is None:
+            raise OrderNotFound(f"order {rejection.order_id} not found")
+
+        status, rejection_code, rejection_detail, rebalance_run_id = order_row
+        if rebalance_run_id != batch.rebalance_run_id:
+            raise InvalidExecutionBatch(
+                f"order {rejection.order_id} belongs to {rebalance_run_id}, "
+                f"not {batch.rebalance_run_id}"
+            )
+
+        current_status = OrderStatus(status)
+        if current_status == OrderStatus.REJECTED:
+            if (
+                rejection_code == rejection.rejection_code
+                and rejection_detail == rejection.rejection_detail
+            ):
+                return True
+            raise IdempotencyConflict(
+                f"rejection conflict for {rejection.order_id}: "
+                f"{rejection_code}/{rejection_detail} != "
+                f"{rejection.rejection_code}/{rejection.rejection_detail}"
+            )
+
+        if current_status != OrderStatus.PENDING:
+            raise InvalidExecutionBatch(
+                f"order {rejection.order_id} cannot be rejected from status {current_status.value}"
+            )
+
+        self.connection.execute(
+            """
+            UPDATE paper_orders
+            SET status = ?,
+                rejection_code = ?,
+                rejection_detail = ?,
+                updated_at = ?
+            WHERE order_id = ? AND account_id = ? AND status = ?
+            """,
+            [
+                OrderStatus.REJECTED.value,
+                rejection.rejection_code,
+                rejection.rejection_detail,
+                now,
+                rejection.order_id,
+                batch.account_id,
+                OrderStatus.PENDING.value,
+            ],
+        )
+        updated = self.connection.execute(
+            """
+            SELECT status
+            FROM paper_orders
+            WHERE order_id = ? AND account_id = ?
+            """,
+            [rejection.order_id, batch.account_id],
+        ).fetchone()
+        if updated is None or OrderStatus(updated[0]) != OrderStatus.REJECTED:
+            raise InvalidExecutionBatch(
+                f"failed to reject order {rejection.order_id}"
+            )
+        return True
 
     def _apply_fill_ledger_effects(
         self, batch: ExecutionBatch, fill: FillSpec, side: OrderSide
@@ -1936,16 +1993,23 @@ class PaperRepository:
                     [spec.account_id, spec.corporate_action_id],
                 ).fetchone()
                 if existing is not None:
+                    existing_revision = int(existing[0])
                     if (
-                        existing[1] == spec.status.value
+                        existing_revision == spec.revision
+                        and existing[1] == spec.status.value
                         and int(existing[2]) == spec.entitlement_quantity
                         and existing[3] == spec.entitlement_source_hash
                     ):
                         self.connection.execute("COMMIT")
-                        return f"{spec.account_id}:{spec.corporate_action_id}:{existing[0]}"
-                    if existing[1] == CorporateActionApplicationStatus.APPLIED.value:
-                        self.connection.execute("COMMIT")
-                        return f"{spec.account_id}:{spec.corporate_action_id}:{existing[0]}"
+                        return f"{spec.account_id}:{spec.corporate_action_id}:{existing_revision}"
+                    if existing_revision == spec.revision:
+                        raise IdempotencyConflict(
+                            f"corporate action conflict for {spec.corporate_action_id} revision {spec.revision}"
+                        )
+                    if spec.revision < existing_revision:
+                        raise IdempotencyConflict(
+                            f"corporate action revision {spec.revision} superseded by {existing_revision}"
+                        )
 
                 self.connection.execute(
                     """
@@ -2080,6 +2144,17 @@ class PaperRepository:
                     """,
                     [new_qty, lot_id],
                 )
+
+    def corporate_action_cash_total(self, account_id: str, corporate_action_id: str) -> Decimal:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(amount_cny), 0)
+            FROM paper_cash_ledger
+            WHERE account_id = ? AND source_type = ? AND source_id = ?
+            """,
+            [account_id, "CORPORATE_ACTION", corporate_action_id],
+        ).fetchone()
+        return money(_decimal(row[0]))
 
     def cash_on(self, account_id: str, as_of_date: date) -> Decimal:
         row = self.connection.execute(

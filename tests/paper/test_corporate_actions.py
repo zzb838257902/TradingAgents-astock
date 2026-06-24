@@ -6,12 +6,15 @@ from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from tradingagents.market_data.contracts import CorporateActionRecord
 from tradingagents.paper.contracts import (
     CorporateActionApplicationStatus,
     PositionEntry,
     PositionSourceType,
 )
+from tradingagents.paper.exceptions import IdempotencyConflict
 from tradingagents.paper.corporate_actions import CorporateActionProcessor
 from tradingagents.paper.repository import PaperRepository
 from tests.paper.conftest import (
@@ -201,3 +204,51 @@ def test_split_preserves_total_cost(repo):
     ).fetchone()
     assert lot_row[0] == 2000
     assert Decimal(str(lot_row[1])) == Decimal("10000.00")
+
+
+def test_dividend_revision_posts_delta_without_overwriting_revision_one(repo):
+    seed_shares(repo)
+    before = repo.cash_on("demo", PAY_DATE)
+    proc = processor(repo)
+    first = proc.apply(dividend(cash_div=0.12))
+    assert first.revision == 1
+    repo.expire_lease_for_test("demo")
+    second = proc.apply(dividend(cash_div=0.20), revision=2)
+    assert second.revision == 2
+    assert second.application_key == "demo:ca-div-600000:2"
+    assert repo.cash_on("demo", PAY_DATE) == before + Decimal("200.00")
+    entries = repo.cash_entries_for("demo", "ca-div-600000")
+    assert len(entries) == 2
+    assert {entry.component for entry in entries} == {"CASH_DIVIDEND", "REVISION_2"}
+    rows = repo.connection.execute(
+        """
+        SELECT revision, status, is_active_revision
+        FROM paper_corporate_action_applications
+        WHERE account_id = ? AND corporate_action_id = ?
+        ORDER BY revision
+        """,
+        ["demo", "ca-div-600000"],
+    ).fetchall()
+    assert rows == [
+        (1, "APPLIED", False),
+        (2, "APPLIED", True),
+    ]
+
+
+def test_dividend_same_revision_replay_is_idempotent(repo):
+    seed_shares(repo)
+    proc = processor(repo)
+    first = proc.apply(dividend(cash_div=0.12))
+    repo.expire_lease_for_test("demo")
+    second = proc.apply(dividend(cash_div=0.12))
+    assert first.application_key == second.application_key
+    assert len(repo.cash_entries_for("demo", first.corporate_action_id)) == 1
+
+
+def test_dividend_same_revision_different_amount_conflicts(repo):
+    seed_shares(repo)
+    proc = processor(repo)
+    proc.apply(dividend(cash_div=0.12))
+    repo.expire_lease_for_test("demo")
+    with pytest.raises(IdempotencyConflict):
+        proc.apply(dividend(cash_div=0.20))

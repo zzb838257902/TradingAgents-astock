@@ -10,8 +10,15 @@ import pytest
 
 from tradingagents.market_data.contracts import MarketOpenSnapshot, QuoteStatus
 from tradingagents.paper.contracts import OrderSide, OrderStatus, PaperOrder
-from tradingagents.paper.execution import ExecutionAccountState, PaperExecutionEngine
+from tradingagents.paper.exceptions import IdempotencyConflict, OrderNotFound
+from tradingagents.paper.execution import (
+    ExecutionAccountState,
+    PaperExecutionEngine,
+    ensure_open_snapshots_frozen,
+    load_open_snapshots_from_inputs,
+)
 from tradingagents.paper.fees import FeeConfig, calculate_fees
+from tradingagents.paper.repository import ExecutionBatch, OrderRejectionSpec
 from tests.paper.conftest import (
     EXECUTION_TIME,
     TRADE_DATE,
@@ -127,3 +134,121 @@ def test_execute_rebalance_is_idempotent(repo):
     assert len(first) == 1
     assert second == first
     assert int(fill_count_after[0]) == int(fill_count[0])
+
+
+def test_execute_rebalance_freezes_open_snapshots(repo):
+    seed_execution_orders(repo)
+    repo.expire_lease_for_test("demo")
+    engine = PaperExecutionEngine()
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    engine.execute_rebalance(
+        repo,
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        snapshots={"600000": snapshot()},
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+    row = repo.connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM paper_run_inputs
+        WHERE run_id = ? AND input_type = 'OPEN_SNAPSHOT'
+        """,
+        ["reb-1"],
+    ).fetchone()
+    assert int(row[0]) == 1
+
+
+def test_execute_rebalance_replay_uses_frozen_snapshot_not_incoming(repo):
+    seed_execution_orders(repo)
+    repo.expire_lease_for_test("demo")
+    engine = PaperExecutionEngine()
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    engine.execute_rebalance(
+        repo,
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        snapshots={"600000": snapshot(open_cny=10.0)},
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+    fill_row = repo.connection.execute(
+        "SELECT price_cny FROM paper_fills WHERE account_id = ?",
+        ["demo"],
+    ).fetchone()
+    assert Decimal(str(fill_row[0])) == Decimal("10.000000")
+    tampered = snapshot(open_cny=99.0)
+    with pytest.raises(IdempotencyConflict):
+        ensure_open_snapshots_frozen(
+            repo,
+            "reb-1",
+            {"600000": tampered},
+        )
+    frozen = load_open_snapshots_from_inputs(repo, "reb-1")
+    assert frozen["600000"].open_cny == 10.0
+
+
+def test_rejection_replay_conflicts_on_different_reason(repo):
+    seed_execution_orders(repo)
+    repo.expire_lease_for_test("demo")
+    batch = ExecutionBatch(
+        account_id="demo",
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        owner_id="executor",
+        fills=[],
+        rejections=[
+            OrderRejectionSpec(
+                order_id="ord-buy-600000",
+                rejection_code="MISSING_SNAPSHOT",
+                rejection_detail="first",
+            )
+        ],
+    )
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.apply_execution_batch(batch, fencing_token=lease.token)
+    lease2 = repo.acquire_account_lease("demo", owner_id="executor")
+    replay = ExecutionBatch(
+        account_id="demo",
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        owner_id="executor",
+        fills=[],
+        rejections=[
+            OrderRejectionSpec(
+                order_id="ord-buy-600000",
+                rejection_code="QUOTE_STATUS",
+                rejection_detail="second",
+            )
+        ],
+    )
+    with pytest.raises(IdempotencyConflict):
+        repo.apply_execution_batch(replay, fencing_token=lease2.token)
+
+
+def test_rejection_missing_order_raises(repo):
+    seed_execution_orders(repo)
+    repo.expire_lease_for_test("demo")
+    batch = ExecutionBatch(
+        account_id="demo",
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME,
+        owner_id="executor",
+        fills=[],
+        rejections=[
+            OrderRejectionSpec(
+                order_id="missing-order",
+                rejection_code="MISSING_SNAPSHOT",
+                rejection_detail="first",
+            )
+        ],
+    )
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    with pytest.raises(OrderNotFound):
+        repo.apply_execution_batch(batch, fencing_token=lease.token)

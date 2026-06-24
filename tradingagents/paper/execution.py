@@ -16,7 +16,7 @@ from tradingagents.backtest.execution_rules import (
 )
 from tradingagents.market_data.contracts import MarketOpenSnapshot, QuoteStatus
 from tradingagents.paper.contracts import OrderSide, OrderStatus, PaperOrder, money
-from tradingagents.paper.exceptions import InvalidExecutionBatch
+from tradingagents.paper.exceptions import IdempotencyConflict, InvalidExecutionBatch
 from tradingagents.paper.fees import FeeConfig, calculate_fees
 from tradingagents.paper.repository import (
     ExecutionBatch,
@@ -82,6 +82,43 @@ def load_open_snapshots_from_inputs(
         snapshot = MarketOpenSnapshot.model_validate(json.loads(row_json))
         snapshots[snapshot.symbol] = snapshot
     return snapshots
+
+
+def _snapshot_payload(snapshot: MarketOpenSnapshot) -> dict:
+    return snapshot.model_dump(mode="json")
+
+
+def _assert_incoming_snapshots_match_frozen(
+    frozen: dict[str, MarketOpenSnapshot],
+    incoming: dict[str, MarketOpenSnapshot],
+) -> None:
+    if set(frozen) != set(incoming):
+        raise IdempotencyConflict("OPEN_SNAPSHOT symbol set mismatch on replay")
+    for symbol, frozen_snapshot in frozen.items():
+        if _snapshot_payload(frozen_snapshot) != _snapshot_payload(incoming[symbol]):
+            raise IdempotencyConflict(f"OPEN_SNAPSHOT conflict for {symbol}")
+
+
+def ensure_open_snapshots_frozen(
+    paper_repo: PaperRepository,
+    run_id: str,
+    snapshots: dict[str, MarketOpenSnapshot] | None,
+) -> dict[str, MarketOpenSnapshot]:
+    frozen = load_open_snapshots_from_inputs(paper_repo, run_id)
+    if frozen:
+        if snapshots is not None:
+            _assert_incoming_snapshots_match_frozen(frozen, snapshots)
+        return frozen
+    if not snapshots:
+        raise InvalidExecutionBatch(
+            f"no frozen OPEN_SNAPSHOT inputs for {run_id} and no snapshots provided"
+        )
+    for snapshot in snapshots.values():
+        paper_repo.capture_run_inputs(open_snapshot_capture(snapshot, run_id=run_id))
+    loaded = load_open_snapshots_from_inputs(paper_repo, run_id)
+    if not loaded:
+        raise InvalidExecutionBatch(f"failed to freeze OPEN_SNAPSHOT inputs for {run_id}")
+    return loaded
 
 
 class PaperExecutionEngine:
@@ -273,16 +310,21 @@ class PaperExecutionEngine:
         rebalance_run_id: str,
         execution_date: date,
         execution_time: datetime,
-        snapshots: dict[str, MarketOpenSnapshot],
         fencing_token: int,
         owner_id: str,
+        snapshots: dict[str, MarketOpenSnapshot] | None = None,
     ) -> RebalanceExecutionResult:
+        frozen_snapshots = ensure_open_snapshots_frozen(
+            paper_repo,
+            rebalance_run_id,
+            snapshots,
+        )
         batch = self.build_execution_batch(
             paper_repo,
             rebalance_run_id=rebalance_run_id,
             execution_date=execution_date,
             execution_time=execution_time,
-            snapshots=snapshots,
+            snapshots=frozen_snapshots,
             owner_id=owner_id,
         )
         fill_ids = paper_repo.apply_execution_batch(
