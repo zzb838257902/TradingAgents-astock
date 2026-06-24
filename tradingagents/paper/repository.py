@@ -32,7 +32,6 @@ from tradingagents.paper.exceptions import (
     AccountNotFound,
     IdempotencyConflict,
     InvalidExecutionBatch,
-    LeaseNotHeld,
     OrderNotFound,
     StaleFencingToken,
 )
@@ -40,6 +39,8 @@ from tradingagents.paper.invariants import assert_account_invariants
 from tradingagents.paper.locking import (
     AccountLease,
     acquire_account_lease,
+    account_transaction_lock,
+    assert_fencing_commit_guard,
     take_over_expired_lease,
     validate_fencing,
 )
@@ -243,7 +244,7 @@ def _rebalance_spec_payload_hash(spec: RebalanceRevisionSpec) -> str:
     )
 
 
-def _order_payload_hash(order: PaperOrder) -> str:
+def _order_creation_payload_hash(order: PaperOrder) -> str:
     return _hash_payload(
         {
             "rebalance_run_id": order.rebalance_run_id,
@@ -251,28 +252,33 @@ def _order_payload_hash(order: PaperOrder) -> str:
             "symbol": order.symbol,
             "side": order.side.value,
             "planned_quantity": order.planned_quantity,
-            "filled_quantity": order.filled_quantity,
-            "remaining_quantity": order.remaining_quantity,
-            "reference_price_cny": str(order.reference_price_cny),
+            "reference_price_cny": str(money(order.reference_price_cny)),
             "limit_price_cny": (
-                str(order.limit_price_cny) if order.limit_price_cny is not None else None
+                str(money(order.limit_price_cny))
+                if order.limit_price_cny is not None
+                else None
             ),
-            "status": order.status.value,
             "rejection_code": order.rejection_code,
             "rejection_detail": order.rejection_detail,
         }
     )
 
 
-def _require_fencing(
-    *,
-    fencing_token: int | None,
-    owner_id: str | None,
-    operation: str,
-    _in_transaction: bool,
-) -> None:
-    if not _in_transaction and (fencing_token is None or owner_id is None):
-        raise LeaseNotHeld(f"{operation} requires fencing_token and owner_id")
+def _fill_payload_hash(fill: FillSpec, execution_date: date) -> str:
+    return _hash_payload(
+        {
+            "account_id": fill.account_id,
+            "symbol": fill.symbol,
+            "execution_date": execution_date.isoformat(),
+            "quantity": fill.quantity,
+            "price_cny": str(money(fill.price_cny)),
+            "commission_cny": str(money(fill.commission_cny)),
+            "stamp_tax_cny": str(money(fill.stamp_tax_cny)),
+            "other_fee_cny": str(money(fill.other_fee_cny)),
+            "source_snapshot_key": fill.source_snapshot_key,
+            "source_snapshot_version_id": fill.source_snapshot_version_id,
+        }
+    )
 
 
 class PaperRepository:
@@ -319,7 +325,7 @@ class PaperRepository:
                     """,
                     [account_id, now],
                 )
-            self.append_cash_entry(
+            self._append_cash_entry_in_tx(
                 CashEntry(
                     cash_entry_id=_new_id("cash"),
                     account_id=account_id,
@@ -330,7 +336,6 @@ class PaperRepository:
                     component="INITIAL_CASH",
                     occurred_at=now,
                 ),
-                _in_transaction=True,
             )
             self.connection.execute("COMMIT")
         except Exception:
@@ -348,16 +353,32 @@ class PaperRepository:
         self,
         entry: CashEntry,
         *,
-        fencing_token: int | None = None,
-        owner_id: str | None = None,
-        _in_transaction: bool = False,
+        fencing_token: int,
+        owner_id: str,
     ) -> str:
-        _require_fencing(
-            fencing_token=fencing_token,
-            owner_id=owner_id,
-            operation="append_cash_entry",
-            _in_transaction=_in_transaction,
-        )
+        with account_transaction_lock(self.paths.home_dir, entry.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                entry_id = self._append_cash_entry_in_tx(entry)
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+        return entry_id
+
+    def _append_cash_entry_in_tx(self, entry: CashEntry) -> str:
         payload_hash = _cash_payload_hash(entry)
         existing = self.connection.execute(
             """
@@ -390,59 +411,59 @@ class PaperRepository:
             [entry.account_id],
         ).fetchone()
         balance_after = money(_decimal(balance_rows[0]) + entry.amount_cny)
-        if not _in_transaction:
-            self.connection.execute("BEGIN")
-        try:
-            if not _in_transaction:
-                validate_fencing(
-                    self.connection,
-                    account_id=entry.account_id,
-                    fencing_token=fencing_token,  # type: ignore[arg-type]
-                    owner_id=owner_id,  # type: ignore[arg-type]
-                )
-            self.connection.execute(
-                """
-                INSERT INTO paper_cash_ledger (
-                    cash_entry_id, account_id, entry_type, amount_cny,
-                    source_type, source_id, component, occurred_at,
-                    balance_after_cny, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    entry.cash_entry_id,
-                    entry.account_id,
-                    entry.entry_type.value,
-                    money(entry.amount_cny),
-                    entry.source_type,
-                    entry.source_id,
-                    entry.component,
-                    entry.occurred_at,
-                    balance_after,
-                    created_at,
-                ],
-            )
-            if not _in_transaction:
-                self.connection.execute("COMMIT")
-        except Exception:
-            if not _in_transaction:
-                self.connection.execute("ROLLBACK")
-            raise
+        self.connection.execute(
+            """
+            INSERT INTO paper_cash_ledger (
+                cash_entry_id, account_id, entry_type, amount_cny,
+                source_type, source_id, component, occurred_at,
+                balance_after_cny, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                entry.cash_entry_id,
+                entry.account_id,
+                entry.entry_type.value,
+                money(entry.amount_cny),
+                entry.source_type,
+                entry.source_id,
+                entry.component,
+                entry.occurred_at,
+                balance_after,
+                created_at,
+            ],
+        )
         return entry.cash_entry_id
 
     def append_position_entry(
         self,
         entry: PositionEntry,
         *,
-        fencing_token: int | None = None,
-        owner_id: str | None = None,
-        _in_transaction: bool = False,
+        fencing_token: int,
+        owner_id: str,
     ) -> str:
-        _require_fencing(
-            fencing_token=fencing_token,
-            owner_id=owner_id,
-            operation="append_position_entry",
-            _in_transaction=_in_transaction,
-        )
+        with account_transaction_lock(self.paths.home_dir, entry.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                entry_id = self._append_position_entry_in_tx(entry)
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=entry.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+        return entry_id
+
+    def _append_position_entry_in_tx(self, entry: PositionEntry) -> str:
         payload_hash = _position_payload_hash(entry)
         existing = self.connection.execute(
             """
@@ -481,67 +502,51 @@ class PaperRepository:
             entry.source_id,
             entry.component,
         )
-        if not _in_transaction:
-            self.connection.execute("BEGIN")
-        try:
-            if not _in_transaction:
-                validate_fencing(
-                    self.connection,
-                    account_id=entry.account_id,
-                    fencing_token=fencing_token,  # type: ignore[arg-type]
-                    owner_id=owner_id,  # type: ignore[arg-type]
-                )
+        self.connection.execute(
+            """
+            INSERT INTO paper_position_ledger (
+                position_entry_id, account_id, symbol, quantity_delta,
+                cost_delta_cny, effective_date, source_type, source_id,
+                component, business_key, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                entry.position_entry_id,
+                entry.account_id,
+                entry.symbol,
+                entry.quantity_delta,
+                money(entry.cost_delta_cny),
+                entry.effective_date,
+                entry.source_type.value,
+                entry.source_id,
+                entry.component,
+                business_key,
+                created_at,
+            ],
+        )
+        if entry.quantity_delta > 0:
             self.connection.execute(
                 """
-                INSERT INTO paper_position_ledger (
-                    position_entry_id, account_id, symbol, quantity_delta,
-                    cost_delta_cny, effective_date, source_type, source_id,
-                    component, business_key, created_at
+                INSERT INTO paper_lots (
+                    lot_id, account_id, symbol, acquired_date, source_type, source_id,
+                    original_quantity, remaining_quantity, original_cost_cny,
+                    remaining_cost_cny, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    entry.position_entry_id,
+                    _new_id("lot"),
                     entry.account_id,
                     entry.symbol,
-                    entry.quantity_delta,
-                    money(entry.cost_delta_cny),
                     entry.effective_date,
                     entry.source_type.value,
                     entry.source_id,
-                    entry.component,
-                    business_key,
+                    entry.quantity_delta,
+                    entry.quantity_delta,
+                    money(entry.cost_delta_cny),
+                    money(entry.cost_delta_cny),
                     created_at,
                 ],
             )
-            if entry.quantity_delta > 0:
-                self.connection.execute(
-                    """
-                    INSERT INTO paper_lots (
-                        lot_id, account_id, symbol, acquired_date, source_type, source_id,
-                        original_quantity, remaining_quantity, original_cost_cny,
-                        remaining_cost_cny, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        _new_id("lot"),
-                        entry.account_id,
-                        entry.symbol,
-                        entry.effective_date,
-                        entry.source_type.value,
-                        entry.source_id,
-                        entry.quantity_delta,
-                        entry.quantity_delta,
-                        money(entry.cost_delta_cny),
-                        money(entry.cost_delta_cny),
-                        created_at,
-                    ],
-                )
-            if not _in_transaction:
-                self.connection.execute("COMMIT")
-        except Exception:
-            if not _in_transaction:
-                self.connection.execute("ROLLBACK")
-            raise
         return entry.position_entry_id
 
     def freeze_screen_run(
@@ -760,7 +765,7 @@ class PaperRepository:
         self.connection.execute("BEGIN")
         try:
             for order in orders:
-                payload_hash = _order_payload_hash(order)
+                payload_hash = _order_creation_payload_hash(order)
                 existing = self.connection.execute(
                     """
                     SELECT rebalance_run_id, account_id, symbol, side,
@@ -788,7 +793,7 @@ class PaperRepository:
                         rejection_code=existing[10],
                         rejection_detail=existing[11],
                     )
-                    if _order_payload_hash(existing_order) != payload_hash:
+                    if _order_creation_payload_hash(existing_order) != payload_hash:
                         raise IdempotencyConflict(
                             f"order conflict for {order.order_id}"
                         )
@@ -918,136 +923,168 @@ class PaperRepository:
     ) -> list[str]:
         fill_ids: list[str] = []
         hooks = fault_injection or {}
-        self.connection.execute("BEGIN")
-        try:
-            if "before_validate" in hooks:
-                hooks["before_validate"]()
-            validate_fencing(
-                self.connection,
-                account_id=batch.account_id,
-                fencing_token=fencing_token,
-                owner_id=batch.owner_id,
-            )
-            for fill in batch.fills:
-                if fill.account_id != batch.account_id:
-                    raise InvalidExecutionBatch("fill account_id mismatch")
-                order_row = self.connection.execute(
-                    """
-                    SELECT order_id, symbol, side, remaining_quantity, filled_quantity,
-                           planned_quantity, status
-                    FROM paper_orders
-                    WHERE order_id = ? AND account_id = ?
-                    """,
-                    [fill.order_id, batch.account_id],
-                ).fetchone()
-                if order_row is None:
-                    raise OrderNotFound(f"order {fill.order_id} not found")
-
-                _, symbol, side, remaining_qty, filled_qty, planned_qty, status = order_row
-                side = OrderSide(side)
-                remaining_qty = int(remaining_qty)
-                filled_qty = int(filled_qty)
-                planned_qty = int(planned_qty)
-
-                existing_fill = self.connection.execute(
-                    """
-                    SELECT fill_id FROM paper_fills
-                    WHERE order_id = ? AND execution_date = ? AND fill_sequence = ?
-                    """,
-                    [fill.order_id, batch.execution_date, fill.fill_sequence],
-                ).fetchone()
-                if existing_fill is None:
-                    self.connection.execute(
+        with account_transaction_lock(self.paths.home_dir, batch.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                if "before_validate" in hooks:
+                    hooks["before_validate"]()
+                validate_fencing(
+                    self.connection,
+                    account_id=batch.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=batch.owner_id,
+                )
+                if "after_validate" in hooks:
+                    hooks["after_validate"]()
+                for fill in batch.fills:
+                    if fill.account_id != batch.account_id:
+                        raise InvalidExecutionBatch("fill account_id mismatch")
+                    order_row = self.connection.execute(
                         """
-                        INSERT INTO paper_fills (
-                            fill_id, fill_sequence, order_id, account_id, symbol,
-                            execution_date, execution_time, quantity, price_cny,
-                            commission_cny, stamp_tax_cny, other_fee_cny,
-                            source_snapshot_key, source_snapshot_version_id
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        SELECT order_id, symbol, side, remaining_quantity, filled_quantity,
+                               planned_quantity, status
+                        FROM paper_orders
+                        WHERE order_id = ? AND account_id = ?
                         """,
-                        [
-                            fill.fill_id,
-                            fill.fill_sequence,
-                            fill.order_id,
-                            fill.account_id,
-                            fill.symbol,
-                            batch.execution_date,
-                            batch.execution_time,
-                            fill.quantity,
-                            fill.price_cny,
-                            money(fill.commission_cny),
-                            money(fill.stamp_tax_cny),
-                            money(fill.other_fee_cny),
-                            fill.source_snapshot_key,
-                            fill.source_snapshot_version_id,
-                        ],
-                    )
-                    fill_ids.append(fill.fill_id)
-                    self._apply_fill_ledger_effects(batch, fill, side)
-                    if "after_fill" in hooks:
-                        hooks["after_fill"]()
+                        [fill.order_id, batch.account_id],
+                    ).fetchone()
+                    if order_row is None:
+                        raise OrderNotFound(f"order {fill.order_id} not found")
 
-                    new_filled = filled_qty + fill.quantity
-                    new_remaining = max(planned_qty - new_filled, 0)
-                    new_status = (
-                        OrderStatus.FILLED
-                        if new_remaining == 0
-                        else OrderStatus.PARTIALLY_FILLED
-                    )
-                    if fill.quantity == 0:
-                        new_status = OrderStatus(status)
-                    self.connection.execute(
+                    _, symbol, side, remaining_qty, filled_qty, planned_qty, status = order_row
+                    side = OrderSide(side)
+                    remaining_qty = int(remaining_qty)
+                    filled_qty = int(filled_qty)
+                    planned_qty = int(planned_qty)
+
+                    existing_fill = self.connection.execute(
                         """
-                        UPDATE paper_orders
-                        SET filled_quantity = ?,
-                            remaining_quantity = ?,
-                            status = ?,
-                            updated_at = ?
-                        WHERE order_id = ?
+                        SELECT fill_id, account_id, symbol, quantity, price_cny,
+                               commission_cny, stamp_tax_cny, other_fee_cny,
+                               source_snapshot_key, source_snapshot_version_id
+                        FROM paper_fills
+                        WHERE order_id = ? AND execution_date = ? AND fill_sequence = ?
                         """,
-                        [
-                            new_filled,
-                            new_remaining,
-                            new_status.value,
-                            datetime.now(tz=SHANGHAI),
-                            fill.order_id,
-                        ],
-                    )
-                else:
-                    fill_ids.append(str(existing_fill[0]))
+                        [fill.order_id, batch.execution_date, fill.fill_sequence],
+                    ).fetchone()
+                    if existing_fill is None:
+                        self.connection.execute(
+                            """
+                            INSERT INTO paper_fills (
+                                fill_id, fill_sequence, order_id, account_id, symbol,
+                                execution_date, execution_time, quantity, price_cny,
+                                commission_cny, stamp_tax_cny, other_fee_cny,
+                                source_snapshot_key, source_snapshot_version_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                fill.fill_id,
+                                fill.fill_sequence,
+                                fill.order_id,
+                                fill.account_id,
+                                fill.symbol,
+                                batch.execution_date,
+                                batch.execution_time,
+                                fill.quantity,
+                                fill.price_cny,
+                                money(fill.commission_cny),
+                                money(fill.stamp_tax_cny),
+                                money(fill.other_fee_cny),
+                                fill.source_snapshot_key,
+                                fill.source_snapshot_version_id,
+                            ],
+                        )
+                        fill_ids.append(fill.fill_id)
+                        self._apply_fill_ledger_effects(batch, fill, side)
+                        if "after_fill" in hooks:
+                            hooks["after_fill"]()
 
-            if "after_cash" in hooks:
-                hooks["after_cash"]()
+                        new_filled = filled_qty + fill.quantity
+                        new_remaining = max(planned_qty - new_filled, 0)
+                        new_status = (
+                            OrderStatus.FILLED
+                            if new_remaining == 0
+                            else OrderStatus.PARTIALLY_FILLED
+                        )
+                        if fill.quantity == 0:
+                            new_status = OrderStatus(status)
+                        self.connection.execute(
+                            """
+                            UPDATE paper_orders
+                            SET filled_quantity = ?,
+                                remaining_quantity = ?,
+                                status = ?,
+                                updated_at = ?
+                            WHERE order_id = ?
+                            """,
+                            [
+                                new_filled,
+                                new_remaining,
+                                new_status.value,
+                                datetime.now(tz=SHANGHAI),
+                                fill.order_id,
+                            ],
+                        )
+                    else:
+                        existing_spec = FillSpec(
+                            fill_id=str(existing_fill[0]),
+                            order_id=fill.order_id,
+                            account_id=str(existing_fill[1]),
+                            symbol=str(existing_fill[2]),
+                            quantity=int(existing_fill[3]),
+                            price_cny=_decimal(existing_fill[4]),
+                            commission_cny=_decimal(existing_fill[5]),
+                            stamp_tax_cny=_decimal(existing_fill[6]),
+                            other_fee_cny=_decimal(existing_fill[7]),
+                            fill_sequence=fill.fill_sequence,
+                            source_snapshot_key=existing_fill[8],
+                            source_snapshot_version_id=existing_fill[9],
+                        )
+                        if _fill_payload_hash(existing_spec, batch.execution_date) != _fill_payload_hash(
+                            fill, batch.execution_date
+                        ):
+                            raise IdempotencyConflict(
+                                f"fill conflict for {fill.order_id}/{batch.execution_date}/{fill.fill_sequence}"
+                            )
+                        fill_ids.append(str(existing_fill[0]))
 
-            self._rebuild_positions_projection(batch.account_id, batch.execution_date)
-            if "before_projection" in hooks:
-                hooks["before_projection"]()
+                if "after_cash" in hooks:
+                    hooks["after_cash"]()
 
-            assert_account_invariants(
-                self.connection,
-                batch.account_id,
-                as_of_date=batch.execution_date,
-            )
-            self.connection.execute(
-                """
-                UPDATE rebalance_runs
-                SET status = ?, completed_at = ?
-                WHERE rebalance_run_id = ?
-                """,
-                [
-                    RunStatus.COMPLETED.value,
-                    datetime.now(tz=SHANGHAI),
-                    batch.rebalance_run_id,
-                ],
-            )
-            self.connection.execute("COMMIT")
-        except StaleFencingToken:
-            self.connection.execute("ROLLBACK")
-            raise
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
+                self._rebuild_positions_projection(batch.account_id, batch.execution_date)
+                if "before_projection" in hooks:
+                    hooks["before_projection"]()
+
+                assert_account_invariants(
+                    self.connection,
+                    batch.account_id,
+                    as_of_date=batch.execution_date,
+                )
+                self.connection.execute(
+                    """
+                    UPDATE rebalance_runs
+                    SET status = ?, completed_at = ?
+                    WHERE rebalance_run_id = ?
+                    """,
+                    [
+                        RunStatus.COMPLETED.value,
+                        datetime.now(tz=SHANGHAI),
+                        batch.rebalance_run_id,
+                    ],
+                )
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=batch.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=batch.owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except StaleFencingToken:
+                self.connection.execute("ROLLBACK")
+                raise
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
         return fill_ids
 
     def _apply_fill_ledger_effects(
@@ -1376,6 +1413,73 @@ class PaperRepository:
             ],
         )
 
+    def _compute_account_projection(self, account_id: str, as_of_date: date) -> AccountProjection:
+        cash_row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(amount_cny), 0)
+            FROM paper_cash_ledger
+            WHERE account_id = ?
+            """,
+            [account_id],
+        ).fetchone()
+        cash_cny = money(_decimal(cash_row[0]))
+        symbols = self.connection.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM paper_position_ledger
+            WHERE account_id = ?
+            """,
+            [account_id],
+        ).fetchall()
+        positions: dict[str, PositionProjection] = {}
+        for (symbol,) in sorted(symbols, key=lambda row: row[0]):
+            qty_row = self.connection.execute(
+                """
+                SELECT COALESCE(SUM(quantity_delta), 0)
+                FROM paper_position_ledger
+                WHERE account_id = ? AND symbol = ?
+                """,
+                [account_id, symbol],
+            ).fetchone()
+            quantity = int(qty_row[0])
+            if quantity == 0:
+                continue
+            lot_row = self.connection.execute(
+                """
+                SELECT COALESCE(SUM(remaining_quantity), 0),
+                       COALESCE(SUM(remaining_cost_cny), 0)
+                FROM paper_lots
+                WHERE account_id = ? AND symbol = ? AND closed_at IS NULL
+                """,
+                [account_id, symbol],
+            ).fetchone()
+            lot_qty = int(lot_row[0])
+            lot_cost = money(_decimal(lot_row[1]))
+            available_row = self.connection.execute(
+                """
+                SELECT COALESCE(SUM(remaining_quantity), 0)
+                FROM paper_lots
+                WHERE account_id = ? AND symbol = ?
+                  AND closed_at IS NULL AND acquired_date < ?
+                """,
+                [account_id, symbol, as_of_date],
+            ).fetchone()
+            available_quantity = int(available_row[0])
+            average_cost = money(lot_cost / Decimal(quantity)) if quantity > 0 else money(0)
+            if lot_qty != quantity and lot_qty > 0:
+                average_cost = money(lot_cost / Decimal(lot_qty))
+            positions[symbol] = PositionProjection(
+                symbol=symbol,
+                quantity=quantity,
+                available_quantity=available_quantity,
+                average_cost_cny=average_cost,
+            )
+        return AccountProjection(
+            account_id=account_id,
+            cash_cny=cash_cny,
+            positions=positions,
+        )
+
     def _rebuild_positions_projection(self, account_id: str, as_of_date: date) -> None:
         now = datetime.now(tz=SHANGHAI)
         symbols = self.connection.execute(
@@ -1462,69 +1566,31 @@ class PaperRepository:
         account_id: str,
         *,
         as_of_date: date | None = None,
-        fencing_token: int | None = None,
-        owner_id: str | None = None,
-        _in_transaction: bool = False,
+        fencing_token: int,
+        owner_id: str,
     ) -> AccountProjection:
-        _require_fencing(
-            fencing_token=fencing_token,
-            owner_id=owner_id,
-            operation="rebuild_account_projection",
-            _in_transaction=_in_transaction,
-        )
         as_of = as_of_date or datetime.now(tz=SHANGHAI).date()
-        if not _in_transaction:
+        with account_transaction_lock(self.paths.home_dir, account_id):
             self.connection.execute("BEGIN")
-        try:
-            if not _in_transaction:
+            try:
                 validate_fencing(
                     self.connection,
                     account_id=account_id,
-                    fencing_token=fencing_token,  # type: ignore[arg-type]
-                    owner_id=owner_id,  # type: ignore[arg-type]
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
                 )
-            self._rebuild_positions_projection(account_id, as_of)
-            cash_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(amount_cny), 0)
-                FROM paper_cash_ledger
-                WHERE account_id = ?
-                """,
-                [account_id],
-            ).fetchone()
-            cash_cny = money(_decimal(cash_row[0]))
-            rows = self.connection.execute(
-                """
-                SELECT symbol, quantity, available_quantity, average_cost_cny,
-                       market_value_cny, last_price_cny
-                FROM paper_positions
-                WHERE account_id = ?
-                ORDER BY symbol
-                """,
-                [account_id],
-            ).fetchall()
-            positions = {
-                row[0]: PositionProjection(
-                    symbol=row[0],
-                    quantity=int(row[1]),
-                    available_quantity=int(row[2]),
-                    average_cost_cny=money(_decimal(row[3])),
-                    market_value_cny=money(_decimal(row[4])),
-                    last_price_cny=money(_decimal(row[5])) if row[5] is not None else None,
+                self._rebuild_positions_projection(account_id, as_of)
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
                 )
-                for row in rows
-            }
-            if not _in_transaction:
                 self.connection.execute("COMMIT")
-        except Exception:
-            if not _in_transaction:
+            except Exception:
                 self.connection.execute("ROLLBACK")
-            raise
-        return AccountProjection(
-            account_id=account_id,
-            cash_cny=cash_cny,
-            positions=positions,
-        )
+                raise
+        return self._compute_account_projection(account_id, as_of)
 
     def load_account_snapshot(self, account_id: str, *, as_of_date: date | None = None) -> AccountSnapshot:
         row = self.connection.execute(
@@ -1547,11 +1613,8 @@ class PaperRepository:
             created_at=row[5],
             updated_at=row[6],
         )
-        projection = self.rebuild_account_projection(
-            account_id,
-            as_of_date=as_of_date,
-            _in_transaction=True,
-        )
+        as_of = as_of_date or datetime.now(tz=SHANGHAI).date()
+        projection = self._compute_account_projection(account_id, as_of)
         return AccountSnapshot(
             account=account,
             cash_cny=projection.cash_cny,

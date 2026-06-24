@@ -8,8 +8,8 @@ from decimal import Decimal
 import pytest
 
 from tradingagents.paper.config import PaperPaths
-from tradingagents.paper.contracts import FrozenScreenRun, TargetPortfolioMode
-from tradingagents.paper.exceptions import IdempotencyConflict, LeaseNotHeld, StaleFencingToken
+from tradingagents.paper.contracts import FrozenScreenRun, OrderSide, OrderStatus, PaperOrder, TargetPortfolioMode
+from tradingagents.paper.exceptions import IdempotencyConflict, StaleFencingToken
 from tradingagents.paper.invariants import assert_account_invariants
 from tradingagents.paper.repository import ValuationWriteSpec
 from tests.paper.conftest import (
@@ -68,20 +68,35 @@ def test_cash_and_position_projection_rebuild_from_ledgers(repo):
 
 def test_append_cash_without_fencing_raises(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    with pytest.raises(LeaseNotHeld):
+    with pytest.raises(TypeError):
         repo.append_cash_entry(cash_entry(entry_id="cash-x", component="BONUS", source_id="x"))
 
 
 def test_append_position_without_fencing_raises(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    with pytest.raises(LeaseNotHeld):
+    with pytest.raises(TypeError):
         repo.append_position_entry(position_entry(entry_id="pos-x"))
 
 
 def test_rebuild_projection_without_fencing_raises(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    with pytest.raises(LeaseNotHeld):
+    with pytest.raises(TypeError):
         repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
+
+
+def test_public_in_transaction_bypass_removed(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    with pytest.raises(TypeError):
+        repo.append_cash_entry(
+            cash_entry(entry_id="cash-x", component="BONUS", source_id="x"),
+            _in_transaction=True,  # type: ignore[call-arg]
+        )
+    with pytest.raises(TypeError):
+        repo.rebuild_account_projection(
+            "demo",
+            as_of_date=TRADE_DATE,
+            _in_transaction=True,  # type: ignore[call-arg]
+        )
 
 
 def test_duplicate_business_key_same_payload_is_idempotent(repo):
@@ -282,3 +297,54 @@ def test_insert_orders_conflict_raises(repo):
     conflicting = orders[0].model_copy(update={"planned_quantity": 2000})
     with pytest.raises(IdempotencyConflict):
         repo.insert_orders([conflicting])
+
+
+def test_insert_orders_idempotent_after_execution(repo):
+    seed_execution_orders(repo)
+    original_order = PaperOrder(
+        order_id="ord-buy-600000",
+        rebalance_run_id="reb-1",
+        account_id="demo",
+        symbol="600000",
+        side=OrderSide.BUY,
+        planned_quantity=1000,
+        remaining_quantity=1000,
+        reference_price_cny=Decimal("10.00"),
+        status=OrderStatus.PENDING,
+    )
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
+    assert repo.list_orders("demo")[0].status == OrderStatus.FILLED
+    repo.insert_orders([original_order])
+
+
+def test_duplicate_fill_key_different_payload_raises(repo):
+    seed_execution_orders(repo)
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    first_batch = make_execution_batch(quantity=1000, price_cny=Decimal("10.00"))
+    repo.apply_execution_batch(first_batch, fencing_token=lease.token)
+    conflicting = make_execution_batch(
+        fill_id="fill-conflict",
+        quantity=500,
+        price_cny=Decimal("11.00"),
+    )
+    with pytest.raises(IdempotencyConflict):
+        repo.apply_execution_batch(conflicting, fencing_token=lease.token)
+
+
+def test_load_account_snapshot_does_not_mutate_projection(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    append_position_with_lease(repo, position_entry())
+    before = repo.connection.execute(
+        "SELECT COUNT(*) FROM paper_positions WHERE account_id = ?",
+        ["demo"],
+    ).fetchone()
+    repo.load_account_snapshot("demo", as_of_date=TRADE_DATE)
+    after = repo.connection.execute(
+        "SELECT COUNT(*) FROM paper_positions WHERE account_id = ?",
+        ["demo"],
+    ).fetchone()
+    assert before == after
+    snapshot = repo.load_account_snapshot("demo", as_of_date=TRADE_DATE)
+    assert snapshot.cash_cny == Decimal("1000000.00")
+    assert snapshot.positions["600000"].quantity == 1000

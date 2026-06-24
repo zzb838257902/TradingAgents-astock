@@ -241,3 +241,27 @@ def validate_fencing(
         raise LeaseExpired(f"lease for account {account_id} expired at {lease_until}")
     if owner_id_existing is None:
         raise LeaseNotHeld(f"account {account_id} has no active lease owner")
+
+
+def assert_fencing_commit_guard(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    account_id: str,
+    fencing_token: int,
+    owner_id: str,
+) -> None:
+    """Re-validate fencing immediately before COMMIT on money-impacting transactions."""
+    validate_fencing(
+        connection,
+        account_id=account_id,
+        fencing_token=fencing_token,
+        owner_id=owner_id,
+    )
+
+
+def account_transaction_lock(
+    home_dir: Path,
+    account_id: str,
+    timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> _AccountFileLock:
+    return _AccountFileLock(_lock_path(home_dir, account_id), timeout_seconds)

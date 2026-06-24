@@ -48,6 +48,8 @@ def make_execution_batch(
     order_id: str = "ord-buy-600000",
     fill_id: str = "fill-1",
     rebalance_run_id: str = "reb-1",
+    quantity: int = 1000,
+    price_cny: Decimal = Decimal("10.00"),
 ) -> ExecutionBatch:
     return ExecutionBatch(
         account_id=account_id,
@@ -61,8 +63,8 @@ def make_execution_batch(
                 order_id=order_id,
                 account_id=account_id,
                 symbol="600000",
-                quantity=1000,
-                price_cny=Decimal("10.00"),
+                quantity=quantity,
+                price_cny=price_cny,
                 commission_cny=Decimal("5.00"),
             )
         ],

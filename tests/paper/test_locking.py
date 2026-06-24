@@ -16,7 +16,7 @@ from tradingagents.paper.exceptions import LeaseConflict, LeaseTimeout, StaleFen
 from tradingagents.paper.locking import _lock_path
 from tradingagents.paper.migrations import SHANGHAI
 from tradingagents.paper.repository import PaperRepository
-from tests.paper.conftest import EXECUTION_BATCH, seed_execution_orders
+from tests.paper.conftest import EXECUTION_BATCH, make_execution_batch, seed_execution_orders
 
 
 def test_acquire_account_lease_increments_fencing_token(repo):
@@ -82,6 +82,74 @@ def test_first_takeover_on_new_account_succeeds(repo):
     assert lease.token == 1
     assert lease.owner_id == "owner-1"
 
+
+def test_stale_token_rejected_after_validate_before_commit(repo):
+    seed_execution_orders(repo)
+    first = repo.acquire_account_lease("demo", owner_id="one")
+
+    def invalidate_after_validate() -> None:
+        now = datetime.now(tz=SHANGHAI)
+        repo.connection.execute(
+            """
+            UPDATE paper_account_locks
+            SET current_fencing_token = ?,
+                owner_id = ?,
+                lease_until = ?,
+                updated_at = ?
+            WHERE account_id = ?
+            """,
+            [
+                first.token + 1,
+                "two",
+                now + timedelta(seconds=300),
+                now,
+                "demo",
+            ],
+        )
+
+    with pytest.raises(StaleFencingToken):
+        repo.apply_execution_batch(
+            EXECUTION_BATCH,
+            fencing_token=first.token,
+            fault_injection={"after_validate": invalidate_after_validate},
+        )
+    fills = repo.connection.execute("SELECT COUNT(*) FROM paper_fills").fetchone()
+    assert int(fills[0]) == 0
+
+
+def test_takeover_blocks_while_execution_holds_file_lock(repo):
+    seed_execution_orders(repo)
+    lease = repo.acquire_account_lease("demo", owner_id="one")
+    other = PaperRepository(repo.paths)
+    started = threading.Event()
+    errors: list[Exception] = []
+
+    def slow_after_validate() -> None:
+        started.set()
+        time.sleep(0.3)
+
+    def try_takeover() -> None:
+        assert started.wait(timeout=5)
+        try:
+            other.acquire_account_lease(
+                "demo",
+                owner_id="two",
+                lock_timeout_seconds=0.2,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=try_takeover)
+    thread.start()
+    repo.apply_execution_batch(
+        make_execution_batch(owner_id="one"),
+        fencing_token=lease.token,
+        fault_injection={"after_validate": slow_after_validate},
+    )
+    thread.join(timeout=5)
+    other.close()
+    assert any(isinstance(exc, LeaseTimeout) for exc in errors)
+    assert repo.connection.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 1
 
 def test_stale_token_rejected_inside_transaction(repo):
     seed_execution_orders(repo)

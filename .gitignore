@@ -2,7 +2,7 @@
 .worktrees/
 
 # Worktree-local pip package symlink
-.pip_packages/
+.pip_packages
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
