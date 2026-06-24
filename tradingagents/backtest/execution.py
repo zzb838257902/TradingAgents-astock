@@ -1,5 +1,8 @@
-import math
-
+from tradingagents.backtest.execution_rules import (
+    cap_requested_quantity,
+    is_one_word_limit_down,
+    is_one_word_limit_up,
+)
 from tradingagents.backtest.models import Bar, Fill, Order, Side
 
 
@@ -22,26 +25,22 @@ class ExecutionModel:
         if bar.suspended or bar.volume <= 0:
             return None
 
-        is_one_word_limit_up = (
-            bar.open == bar.high == bar.low == bar.close == bar.limit_up
-        )
-        is_one_word_limit_down = (
-            bar.open == bar.high == bar.low == bar.close == bar.limit_down
-        )
-
-        if order.side == Side.BUY and is_one_word_limit_up:
+        if order.side == Side.BUY and is_one_word_limit_up(
+            bar.open, bar.high, bar.low, bar.close, bar.limit_up
+        ):
             return None
-        if order.side == Side.SELL and is_one_word_limit_down:
+        if order.side == Side.SELL and is_one_word_limit_down(
+            bar.open, bar.high, bar.low, bar.close, bar.limit_down
+        ):
             return None
 
-        quantity = order.shares
-        if order.side == Side.SELL:
-            quantity = min(quantity, sellable_shares)
-            if quantity <= 0:
-                return None
-
-        max_shares = int(math.floor(bar.volume * self.max_participation_rate / 100)) * 100
-        quantity = min(quantity, max_shares)
+        quantity = cap_requested_quantity(
+            requested_quantity=order.shares,
+            sellable_shares=sellable_shares,
+            is_sell=order.side == Side.SELL,
+            cumulative_volume_shares=bar.volume,
+            max_participation_rate=self.max_participation_rate,
+        )
         if quantity <= 0:
             return None
 

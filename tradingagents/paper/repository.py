@@ -67,6 +67,13 @@ class FillSpec:
 
 
 @dataclass(frozen=True)
+class OrderRejectionSpec:
+    order_id: str
+    rejection_code: str
+    rejection_detail: str | None = None
+
+
+@dataclass(frozen=True)
 class ExecutionBatch:
     account_id: str
     rebalance_run_id: str
@@ -74,6 +81,7 @@ class ExecutionBatch:
     execution_time: datetime
     fills: list[FillSpec]
     owner_id: str
+    rejections: list[OrderRejectionSpec] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1057,6 +1065,40 @@ class PaperRepository:
             for row in rows
         ]
 
+    def list_pending_orders_for_rebalance(self, rebalance_run_id: str) -> list[PaperOrder]:
+        rows = self.connection.execute(
+            """
+            SELECT order_id, rebalance_run_id, account_id, symbol, side,
+                   planned_quantity, filled_quantity, remaining_quantity,
+                   reference_price_cny, limit_price_cny, status,
+                   rejection_code, rejection_detail, created_at, updated_at
+            FROM paper_orders
+            WHERE rebalance_run_id = ? AND status = ?
+            ORDER BY side DESC, symbol, order_id
+            """,
+            [rebalance_run_id, OrderStatus.PENDING.value],
+        ).fetchall()
+        return [
+            PaperOrder(
+                order_id=row[0],
+                rebalance_run_id=row[1],
+                account_id=row[2],
+                symbol=row[3],
+                side=OrderSide(row[4]),
+                planned_quantity=int(row[5]),
+                filled_quantity=int(row[6]),
+                remaining_quantity=int(row[7]),
+                reference_price_cny=_decimal(row[8]),
+                limit_price_cny=_decimal(row[9]) if row[9] is not None else None,
+                status=OrderStatus(row[10]),
+                rejection_code=row[11],
+                rejection_detail=row[12],
+                created_at=row[13],
+                updated_at=row[14],
+            )
+            for row in rows
+        ]
+
     def acquire_account_lease(
         self,
         account_id: str,
@@ -1240,6 +1282,42 @@ class PaperRepository:
                             )
                         fill_ids.append(str(existing_fill[0]))
 
+                now = datetime.now(tz=SHANGHAI)
+                has_rejections = False
+                has_partial = False
+                for rejection in batch.rejections:
+                    self.connection.execute(
+                        """
+                        UPDATE paper_orders
+                        SET status = ?,
+                            rejection_code = ?,
+                            rejection_detail = ?,
+                            updated_at = ?
+                        WHERE order_id = ? AND account_id = ? AND status = ?
+                        """,
+                        [
+                            OrderStatus.REJECTED.value,
+                            rejection.rejection_code,
+                            rejection.rejection_detail,
+                            now,
+                            rejection.order_id,
+                            batch.account_id,
+                            OrderStatus.PENDING.value,
+                        ],
+                    )
+                    has_rejections = True
+
+                partial_rows = self.connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM paper_orders
+                    WHERE rebalance_run_id = ? AND status = ?
+                    """,
+                    [batch.rebalance_run_id, OrderStatus.PARTIALLY_FILLED.value],
+                ).fetchone()
+                if partial_rows is not None and int(partial_rows[0]) > 0:
+                    has_partial = True
+
                 if "after_cash" in hooks:
                     hooks["after_cash"]()
 
@@ -1252,6 +1330,9 @@ class PaperRepository:
                     batch.account_id,
                     as_of_date=batch.execution_date,
                 )
+                final_status = RunStatus.COMPLETED
+                if has_rejections or has_partial:
+                    final_status = RunStatus.COMPLETED_WITH_REJECTIONS
                 self.connection.execute(
                     """
                     UPDATE rebalance_runs
@@ -1259,7 +1340,7 @@ class PaperRepository:
                     WHERE rebalance_run_id = ?
                     """,
                     [
-                        RunStatus.COMPLETED.value,
+                        final_status.value,
                         datetime.now(tz=SHANGHAI),
                         batch.rebalance_run_id,
                     ],
