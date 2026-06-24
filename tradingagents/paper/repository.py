@@ -26,6 +26,8 @@ from tradingagents.paper.contracts import (
     PositionEntry,
     PositionSourceType,
     RunStatus,
+    RunStep,
+    StepStatus,
     money,
 )
 from tradingagents.paper.exceptions import (
@@ -117,6 +119,18 @@ class RunInputCapture:
     row_json: str
     source_dataset_version_id: str | None = None
     source_available_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RunStepWriteSpec:
+    run_id: str
+    step_name: str
+    status: StepStatus
+    input_hash: str | None = None
+    output_json: str | None = None
+    error_json: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -2458,6 +2472,119 @@ class PaperRepository:
             valuation_manifest_hash=spec.valuation_manifest_hash,
             created_at=created_at,
         )
+
+    def find_active_rebalance_for_execution(
+        self, account_id: str, execution_date: date
+    ) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT rebalance_run_id
+            FROM rebalance_runs
+            WHERE account_id = ? AND execution_date = ? AND is_active_revision = TRUE
+            ORDER BY revision DESC
+            LIMIT 1
+            """,
+            [account_id, execution_date],
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def save_run_step(self, spec: RunStepWriteSpec) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        started_at = spec.started_at or now
+        finished_at = spec.finished_at
+        if finished_at is None and spec.status != StepStatus.RUNNING:
+            finished_at = now
+        existing = self.get_run_step(spec.run_id, spec.step_name)
+        if existing is not None and existing.status == StepStatus.SUCCESS:
+            if spec.input_hash and existing.input_hash != spec.input_hash:
+                raise IdempotencyConflict(
+                    f"run step input hash conflict for {spec.run_id}/{spec.step_name}"
+                )
+            if spec.status == StepStatus.SUCCESS:
+                return
+        self.connection.execute(
+            """
+            INSERT INTO paper_run_steps (
+                run_id, step_name, status, input_hash, output_json, error_json,
+                started_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (run_id, step_name) DO UPDATE SET
+                status = excluded.status,
+                input_hash = excluded.input_hash,
+                output_json = excluded.output_json,
+                error_json = excluded.error_json,
+                started_at = COALESCE(paper_run_steps.started_at, excluded.started_at),
+                finished_at = excluded.finished_at
+            """,
+            [
+                spec.run_id,
+                spec.step_name,
+                spec.status.value,
+                spec.input_hash,
+                spec.output_json,
+                spec.error_json,
+                started_at,
+                finished_at,
+            ],
+        )
+
+    def get_run_step(self, run_id: str, step_name: str) -> RunStep | None:
+        row = self.connection.execute(
+            """
+            SELECT run_id, step_name, status, input_hash, output_json, error_json,
+                   started_at, finished_at
+            FROM paper_run_steps
+            WHERE run_id = ? AND step_name = ?
+            """,
+            [run_id, step_name],
+        ).fetchone()
+        if row is None:
+            return None
+        return RunStep(
+            run_id=row[0],
+            step_name=row[1],
+            status=StepStatus(row[2]),
+            input_hash=row[3],
+            output_json=row[4],
+            error_json=row[5],
+            started_at=row[6],
+            finished_at=row[7],
+        )
+
+    def list_run_steps(self, run_id: str) -> list[RunStep]:
+        rows = self.connection.execute(
+            """
+            SELECT run_id, step_name, status, input_hash, output_json, error_json,
+                   started_at, finished_at
+            FROM paper_run_steps
+            WHERE run_id = ?
+            ORDER BY started_at, step_name
+            """,
+            [run_id],
+        ).fetchall()
+        return [
+            RunStep(
+                run_id=row[0],
+                step_name=row[1],
+                status=StepStatus(row[2]),
+                input_hash=row[3],
+                output_json=row[4],
+                error_json=row[5],
+                started_at=row[6],
+                finished_at=row[7],
+            )
+            for row in rows
+        ]
+
+    def count_fills(self, account_id: str | None = None) -> int:
+        if account_id is None:
+            row = self.connection.execute("SELECT COUNT(*) FROM paper_fills").fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT COUNT(*) FROM paper_fills WHERE account_id = ?",
+                [account_id],
+            ).fetchone()
+        return int(row[0])
 
     def count_rows(self) -> dict[str, int]:
         tables = (
