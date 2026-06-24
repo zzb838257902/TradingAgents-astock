@@ -29,6 +29,7 @@ from tradingagents.market_data.providers.free_astock_sources import (
     LiveFreeAStockSourceBackend,
     ProviderFetchError,
     normalize_tencent_daily_indicator_row,
+    normalize_tencent_open_snapshot_row,
 )
 from tradingagents.events.contracts import MarketEvent
 from tradingagents.events.normalizer import normalize_fund_flow_row, normalize_hot_topic_row, normalize_news_row
@@ -378,6 +379,129 @@ class FreeAStockProvider:
             available_at=available_at,
             pit_level=PITLevel.BEST_EFFORT,
         )
+
+    def get_market_open_snapshots(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> DataResult[list[dict]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        cutoff = ensure_aware_shanghai(observed_at)
+        today = shanghai_today()
+        if trade_date != today:
+            return _result(
+                None,
+                status=DataStatus.NOT_AVAILABLE_YET,
+                source=self.name,
+                as_of=run_time,
+                available_at=cutoff,
+                pit_level=PITLevel.PIT_REQUIRED,
+                errors=[
+                    "market_open_snapshots free path only supports the current Shanghai "
+                    f"trade date {today.isoformat()}; requested {trade_date.isoformat()}",
+                ],
+            )
+        requested = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+        if not requested:
+            return _result(
+                None,
+                status=DataStatus.DATA_QUALITY_FAILED,
+                source=self.name,
+                as_of=run_time,
+                available_at=cutoff,
+                pit_level=PITLevel.PIT_REQUIRED,
+                errors=["empty symbol list for market_open_snapshots"],
+            )
+        rows: list[dict] = []
+        total_raw = 0
+        parse_failures = 0
+        for batch_index, batch_start in enumerate(range(0, len(requested), self._batch_size)):
+            batch = requested[batch_start:batch_start + self._batch_size]
+            if batch_index > 0:
+                self._sleep_between_batches()
+            try:
+                raw_rows = self._fetch_tencent_open_snapshots_with_retry(batch)
+            except ProviderFetchError as exc:
+                status = _FETCH_ERROR_TO_STATUS.get(exc.status, DataStatus.ERROR)
+                return _result(
+                    None,
+                    status=status,
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=cutoff,
+                    pit_level=PITLevel.PIT_REQUIRED,
+                    errors=[exc.message],
+                )
+            total_raw += len(raw_rows)
+            for raw in raw_rows:
+                symbol = str(raw.get("symbol", "")).strip()
+                try:
+                    rows.append(
+                        normalize_tencent_open_snapshot_row(
+                            symbol,
+                            trade_date,
+                            cutoff,
+                            raw,
+                            source=self.name,
+                        )
+                    )
+                except ValueError:
+                    parse_failures += 1
+
+        if not rows:
+            if total_raw == 0:
+                return _result(
+                    None,
+                    status=DataStatus.PARSE_ERROR,
+                    source=self.name,
+                    as_of=run_time,
+                    available_at=cutoff,
+                    pit_level=PITLevel.PIT_REQUIRED,
+                    errors=["tencent returned no quotes for requested symbols"],
+                )
+            return _result(
+                None,
+                status=DataStatus.PARSE_ERROR,
+                source=self.name,
+                as_of=run_time,
+                available_at=cutoff,
+                pit_level=PITLevel.PIT_REQUIRED,
+                errors=[f"all {parse_failures} open snapshot rows failed validation"],
+            )
+
+        available_at = max(row["available_at"] for row in rows)
+        return _result(
+            rows,
+            status=DataStatus.OK,
+            source=self.name,
+            as_of=run_time,
+            available_at=available_at,
+            pit_level=PITLevel.PIT_REQUIRED,
+        )
+
+    def _fetch_tencent_open_snapshots_with_retry(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]:
+        import time
+
+        sleeper = self._sleeper or time.sleep
+        last_error: ProviderFetchError | None = None
+        retriable = set(_FETCH_ERROR_TO_STATUS)
+        for attempt in range(self._max_attempts):
+            try:
+                return self._backend.fetch_tencent_open_snapshots(symbols)
+            except ProviderFetchError as exc:
+                if exc.status not in retriable:
+                    raise
+                last_error = exc
+                if attempt + 1 >= self._max_attempts:
+                    raise
+                sleeper(self._retry_base_delay * (2 ** attempt))
+        if last_error is not None:
+            raise last_error
+        return []
 
     def _sleep_between_batches(self) -> None:
         if self._batch_pause <= 0:

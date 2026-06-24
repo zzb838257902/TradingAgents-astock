@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 
 def _connect(path: Path) -> duckdb.DuckDBPyConnection:
@@ -567,6 +567,66 @@ def _migration_steps() -> list[tuple[int, str]]:
                 ingested_at TIMESTAMPTZ,
                 PRIMARY KEY(run_id, symbol, trade_date, source)
             );
+        """),
+        (12, """
+            CREATE TABLE IF NOT EXISTS market_open_snapshots (
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                observed_at TIMESTAMPTZ NOT NULL,
+                open_cny DOUBLE NOT NULL,
+                prev_close_cny DOUBLE NOT NULL,
+                last_cny DOUBLE NOT NULL,
+                cumulative_volume_shares BIGINT NOT NULL,
+                quote_status VARCHAR NOT NULL,
+                upper_limit_cny DOUBLE NOT NULL,
+                lower_limit_cny DOUBLE NOT NULL,
+                source VARCHAR NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                dataset_version_id VARCHAR,
+                PRIMARY KEY(symbol, trade_date, observed_at, source)
+            );
+            CREATE TABLE IF NOT EXISTS staging_market_open_snapshots (
+                run_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                observed_at TIMESTAMPTZ NOT NULL,
+                open_cny DOUBLE NOT NULL,
+                prev_close_cny DOUBLE NOT NULL,
+                last_cny DOUBLE NOT NULL,
+                cumulative_volume_shares BIGINT NOT NULL,
+                quote_status VARCHAR NOT NULL,
+                upper_limit_cny DOUBLE NOT NULL,
+                lower_limit_cny DOUBLE NOT NULL,
+                source VARCHAR NOT NULL,
+                available_at TIMESTAMPTZ NOT NULL,
+                ingested_at TIMESTAMPTZ,
+                PRIMARY KEY(run_id, symbol, trade_date, observed_at, source)
+            );
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS corporate_action_id VARCHAR;
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS announcement_at TIMESTAMPTZ;
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS record_date DATE;
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS pay_date DATE;
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS source_version VARCHAR;
+            ALTER TABLE corporate_actions
+                ADD COLUMN IF NOT EXISTS supersedes_action_id VARCHAR;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS corporate_action_id VARCHAR;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS announcement_at TIMESTAMPTZ;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS record_date DATE;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS pay_date DATE;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS source_version VARCHAR;
+            ALTER TABLE staging_corporate_actions
+                ADD COLUMN IF NOT EXISTS supersedes_action_id VARCHAR;
         """),
     ]
 

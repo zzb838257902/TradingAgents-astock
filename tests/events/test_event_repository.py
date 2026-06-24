@@ -75,7 +75,7 @@ def _link(event_id: str, symbol: str = "600000") -> EventSymbolLink:
 
 def test_schema_version_includes_event_tables(tmp_path):
     repo = MarketDataRepository(tmp_path / "market.duckdb")
-    assert CURRENT_SCHEMA_VERSION == 11
+    assert CURRENT_SCHEMA_VERSION == 12
     tables = {row[0] for row in repo.connection.execute("SHOW TABLES").fetchall()}
     for name in (
         "market_events",

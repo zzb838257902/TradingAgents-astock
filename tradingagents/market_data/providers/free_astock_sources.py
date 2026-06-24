@@ -169,6 +169,86 @@ def parse_tencent_quote_response(raw: str) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_tencent_open_snapshot_response(raw: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in raw.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        vals = line.split('"')[1].split("~")
+        if len(vals) < 49:
+            continue
+        code = key[2:]
+        if not _A_SHARE_CODE.match(code):
+            continue
+        rows.append({
+            "symbol": code,
+            "last_cny": _finite_float(vals[3]),
+            "prev_close_cny": _finite_float(vals[4]),
+            "open_cny": _finite_float(vals[5]),
+            "volume_lots": int(float(vals[6])) if vals[6] else 0,
+            "upper_limit_cny": _finite_float(vals[47]),
+            "lower_limit_cny": _finite_float(vals[48]),
+        })
+    return rows
+
+
+def infer_tencent_quote_status(open_cny: float | None, volume_lots: int) -> str:
+    if open_cny is None or open_cny <= 0:
+        return "suspended"
+    if volume_lots <= 0:
+        return "unknown"
+    return "trading"
+
+
+def normalize_tencent_open_snapshot_row(
+    symbol: str,
+    trade_date: date,
+    observed_at: datetime,
+    raw: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    if not _A_SHARE_CODE.match(symbol):
+        raise ValueError(f"invalid symbol: {symbol}")
+    open_cny = _finite_float(raw.get("open_cny"))
+    prev_close_cny = _finite_float(raw.get("prev_close_cny"))
+    last_cny = _finite_float(raw.get("last_cny"))
+    upper_limit_cny = _finite_float(raw.get("upper_limit_cny"))
+    lower_limit_cny = _finite_float(raw.get("lower_limit_cny"))
+    volume_lots = int(raw.get("volume_lots") or 0)
+    if (
+        open_cny is None
+        or prev_close_cny is None
+        or last_cny is None
+        or upper_limit_cny is None
+        or lower_limit_cny is None
+    ):
+        raise ValueError(f"missing open snapshot fields for {symbol}")
+    if open_cny <= 0 or prev_close_cny <= 0 or last_cny <= 0:
+        raise ValueError(f"open snapshot prices must be positive for {symbol}")
+    if upper_limit_cny <= 0 or lower_limit_cny <= 0:
+        raise ValueError(f"open snapshot limits must be positive for {symbol}")
+    cumulative_volume_shares = max(volume_lots, 0) * 100
+    available_at = observed_at
+    if available_at.tzinfo is None:
+        available_at = available_at.replace(tzinfo=SHANGHAI)
+    return {
+        "symbol": symbol,
+        "trade_date": trade_date,
+        "observed_at": available_at,
+        "open_cny": open_cny,
+        "prev_close_cny": prev_close_cny,
+        "last_cny": last_cny,
+        "cumulative_volume_shares": cumulative_volume_shares,
+        "quote_status": infer_tencent_quote_status(open_cny, volume_lots),
+        "upper_limit_cny": upper_limit_cny,
+        "lower_limit_cny": lower_limit_cny,
+        "available_at": available_at,
+        "source": source,
+    }
+
+
 class FreeAStockSourceBackend(Protocol):
     def list_mootdx_stocks(self) -> list[dict[str, Any]]: ...
 
@@ -197,6 +277,11 @@ class FreeAStockSourceBackend(Protocol):
     def fetch_ths_hot_topic_rows(self, trade_date: date) -> list[dict[str, Any]]: ...
 
     def fetch_tencent_daily_indicators(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]: ...
+
+    def fetch_tencent_open_snapshots(
         self,
         symbols: list[str],
     ) -> list[dict[str, object]]: ...
@@ -589,6 +674,44 @@ class LiveFreeAStockSourceBackend:
         if not parsed and raw.strip():
             raise ProviderFetchError("parse_error", "unable to parse tencent quote response")
         return parsed
+
+    def fetch_tencent_open_snapshots(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, object]]:
+        raw = _fetch_tencent_quote_raw(symbols)
+        try:
+            parsed = parse_tencent_open_snapshot_response(raw)
+        except Exception as exc:
+            raise ProviderFetchError("parse_error", str(exc)) from exc
+        if not parsed and raw.strip():
+            raise ProviderFetchError("parse_error", "unable to parse tencent open snapshot response")
+        return parsed
+
+
+def _fetch_tencent_quote_raw(symbols: list[str]) -> str:
+    import urllib.error
+    import urllib.request
+
+    valid = [symbol for symbol in symbols if _A_SHARE_CODE.match(symbol)]
+    if not valid:
+        return ""
+    prefixed = [f"{_tencent_market_prefix(code)}{code}" for code in valid]
+    url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+    request = urllib.request.Request(url)
+    request.add_header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read().decode("gbk", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise ProviderFetchError("rate_limited", f"HTTP 429 for {url}") from exc
+        raise ProviderFetchError("http_error", f"HTTP {exc.code} for {url}") from exc
+    except Exception as exc:
+        raise ProviderFetchError("network_error", str(exc)) from exc
 
 
 def _report_period_from_row(row: pd.Series) -> str | None:

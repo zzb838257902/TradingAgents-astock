@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from tradingagents.market_data.financials import next_open_trading_day
+from tradingagents.market_data.market_hours import ensure_aware_shanghai
 
 MAX_DAILY_INDICATOR_MARKET_CAP_CNY = 100_000_000_000_000
 DAILY_INDICATOR_COMPLETENESS_THRESHOLD = 0.80
@@ -179,6 +180,116 @@ def assess_daily_indicator_quality(
                     symbol=symbol or None,
                     trade_date=trade_date,
                 ))
+    return issues
+
+
+def assess_market_open_snapshot_quality(
+    rows: list[dict],
+    trade_date: date,
+    observed_at: datetime,
+    *,
+    requested_symbols: list[str],
+) -> list[QualityIssue]:
+    issues: list[QualityIssue] = []
+    cutoff = ensure_aware_shanghai(observed_at)
+    seen: set[tuple[str, str, str]] = set()
+    present_symbols: set[str] = set()
+
+    for row in rows:
+        symbol = str(row.get("symbol", "")).strip()
+        row_trade_date = row.get("trade_date")
+        source = str(row.get("source", "")).strip()
+        row_observed_at = row.get("observed_at")
+        if row_trade_date != trade_date:
+            issues.append(QualityIssue(
+                rule="trade_date_mismatch",
+                severity="blocking",
+                detail=f"expected {trade_date.isoformat()}, got {row_trade_date}",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+        observed_key = str(row_observed_at)
+        key = (symbol, observed_key, source)
+        if key in seen:
+            issues.append(QualityIssue(
+                rule="duplicate_primary_key",
+                severity="blocking",
+                detail=f"duplicate open snapshot key for {symbol}",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+        seen.add(key)
+        present_symbols.add(symbol)
+
+        for field_name in ("observed_at", "available_at"):
+            value = row.get(field_name)
+            if value is None:
+                issues.append(QualityIssue(
+                    rule="missing_timestamp",
+                    severity="blocking",
+                    detail=f"open snapshot missing {field_name}",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+                continue
+            aware = ensure_aware_shanghai(value)
+            if aware.tzinfo is None:
+                issues.append(QualityIssue(
+                    rule="naive_timestamp",
+                    severity="blocking",
+                    detail=f"{field_name} must be timezone-aware",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+            if field_name == "available_at" and aware > cutoff:
+                issues.append(QualityIssue(
+                    rule="available_after_cutoff",
+                    severity="blocking",
+                    detail=f"available_at {aware.isoformat()} after cutoff {cutoff.isoformat()}",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+
+        volume = row.get("cumulative_volume_shares")
+        if volume is None or int(volume) < 0:
+            issues.append(QualityIssue(
+                rule="negative_volume",
+                severity="blocking",
+                detail="cumulative_volume_shares must be non-negative",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+
+        for field_name in ("open_cny", "prev_close_cny", "last_cny", "upper_limit_cny", "lower_limit_cny"):
+            value = row.get(field_name)
+            if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+                issues.append(QualityIssue(
+                    rule="non_positive_price",
+                    severity="blocking",
+                    detail=f"{field_name} must be a positive finite number",
+                    symbol=symbol or None,
+                    trade_date=trade_date,
+                ))
+
+        quote_status = str(row.get("quote_status", "")).strip()
+        if quote_status not in {"trading", "suspended", "halted", "unknown"}:
+            issues.append(QualityIssue(
+                rule="invalid_quote_status",
+                severity="blocking",
+                detail=f"invalid quote_status {quote_status!r}",
+                symbol=symbol or None,
+                trade_date=trade_date,
+            ))
+
+    missing = sorted(set(requested_symbols) - present_symbols)
+    for symbol in missing:
+        issues.append(QualityIssue(
+            rule="missing_symbol",
+            severity="blocking",
+            detail=f"missing open snapshot for requested symbol {symbol}",
+            symbol=symbol,
+            trade_date=trade_date,
+        ))
     return issues
 
 

@@ -30,6 +30,14 @@ class MarketDataProvider(Protocol):
     def get_daily_indicators(self, trade_date: date) -> DataResult[list[dict]]:
         ...
 
+    def get_market_open_snapshots(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> DataResult[list[dict]]:
+        ...
+
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime
     ) -> DataResult[list[dict]]:

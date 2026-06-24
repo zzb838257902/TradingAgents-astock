@@ -491,6 +491,23 @@ class TushareProvider:
             "status": DataStatus.OK if rows else DataStatus.SUCCESS_EMPTY,
         })
 
+    def get_market_open_snapshots(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> DataResult[list[dict]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        return DataResult(
+            data=None,
+            status=DataStatus.NOT_AVAILABLE_YET,
+            source=self.name,
+            as_of=run_time,
+            available_at=ensure_aware_shanghai(observed_at),
+            pit_level=PITLevel.PIT_REQUIRED,
+            errors=["market_open_snapshots not implemented for tushare provider"],
+        )
+
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime
     ) -> DataResult[list[dict]]:

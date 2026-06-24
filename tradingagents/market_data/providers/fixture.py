@@ -178,6 +178,25 @@ class FixtureProvider:
             pit_level=PITLevel.BEST_EFFORT,
         )
 
+    def get_market_open_snapshots(
+        self,
+        symbols: Sequence[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> DataResult[list[dict]]:
+        run_time = datetime.now(tz=SHANGHAI)
+        cutoff = ensure_aware_shanghai(observed_at)
+        return DataResult(
+            data=[],
+            status=DataStatus.SUCCESS_EMPTY,
+            source=self.name,
+            as_of=run_time,
+            available_at=cutoff,
+            ingested_at=run_time,
+            run_time=run_time,
+            pit_level=PITLevel.PIT_REQUIRED,
+        )
+
     def get_financials(
         self, symbols: Sequence[str], announced_before: datetime
     ) -> DataResult[list[dict]]:

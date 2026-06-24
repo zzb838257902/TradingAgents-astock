@@ -19,7 +19,7 @@ def test_apply_migrations_is_idempotent(tmp_path):
     second = apply_migrations(db_path)
     assert first == CURRENT_SCHEMA_VERSION
     assert second == CURRENT_SCHEMA_VERSION
-    assert CURRENT_SCHEMA_VERSION == 11
+    assert CURRENT_SCHEMA_VERSION == 12
 
 
 def test_fresh_repository_has_phase4_tables(tmp_path):

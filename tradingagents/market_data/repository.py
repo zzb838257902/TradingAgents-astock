@@ -14,11 +14,12 @@ import duckdb
 from tradingagents.events.contracts import EventSymbolLink, MarketEvent, stable_event_id
 from tradingagents.market_data.contracts import PITLevel, SecurityRecord
 from tradingagents.market_data.financials import normalize_financial_row, pick_latest_visible_financials
-from tradingagents.market_data.market_hours import post_close_signal_time
+from tradingagents.market_data.market_hours import ensure_aware_shanghai, post_close_signal_time
 from tradingagents.market_data.migrations import apply_migrations
 from tradingagents.market_data.quality import (
     DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
     assess_daily_indicator_quality,
+    assess_market_open_snapshot_quality,
     build_daily_indicator_completeness_report,
 )
 
@@ -35,6 +36,15 @@ _DAILY_BAR_COLUMNS = (
 _DAILY_INDICATOR_COLUMNS = (
     "symbol", "trade_date", "pe_ttm", "pb", "turnover_pct",
     "total_market_cap_cny", "float_market_cap_cny", "available_at", "source",
+)
+_MARKET_OPEN_SNAPSHOT_COLUMNS = (
+    "symbol", "trade_date", "observed_at", "open_cny", "prev_close_cny",
+    "last_cny", "cumulative_volume_shares", "quote_status", "upper_limit_cny",
+    "lower_limit_cny", "available_at", "source",
+)
+_CORPORATE_ACTION_EXTENDED_COLUMNS = (
+    "corporate_action_id", "announcement_at", "record_date", "pay_date",
+    "source_version", "supersedes_action_id",
 )
 _FINANCIAL_COLUMNS = (
     "symbol", "report_period", "roe", "operating_cashflow", "net_profit",
@@ -383,6 +393,37 @@ class MarketDataRepository:
         rows = self.connection.execute(query, params).fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
+    def get_market_open_snapshots(
+        self,
+        symbols: list[str],
+        trade_date: date,
+        available_before: datetime,
+        version_id: str | None = None,
+    ) -> list[dict]:
+        if not symbols:
+            return []
+        placeholders = ", ".join("?" for _ in symbols)
+        params: list = list(symbols)
+        query = f"""
+            SELECT s.symbol, s.trade_date, s.observed_at, s.open_cny, s.prev_close_cny,
+                   s.last_cny, s.cumulative_volume_shares, s.quote_status,
+                   s.upper_limit_cny, s.lower_limit_cny, s.available_at, s.source
+            FROM market_open_snapshots s
+            INNER JOIN dataset_versions v ON s.dataset_version_id = v.version_id
+            WHERE s.symbol IN ({placeholders})
+              AND s.trade_date = ?
+              AND s.available_at <= ?
+              AND v.status = 'PUBLISHED'
+        """
+        params.extend([trade_date, available_before])
+        if version_id is not None:
+            query += " AND s.dataset_version_id = ?"
+            params.append(version_id)
+        query += " ORDER BY s.symbol, s.observed_at"
+        columns = list(_MARKET_OPEN_SNAPSHOT_COLUMNS)
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
     def upsert_financials(self, rows: Iterable[dict]) -> None:
         open_dates = self.list_open_trade_dates()
         values = []
@@ -575,6 +616,38 @@ class MarketDataRepository:
             values,
         )
 
+    def upsert_staging_market_open_snapshots(self, run_id: str, rows: Iterable[dict]) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        values = [
+            (
+                run_id,
+                row["symbol"],
+                row["trade_date"],
+                ensure_aware_shanghai(row["observed_at"]),
+                row["open_cny"],
+                row["prev_close_cny"],
+                row["last_cny"],
+                row["cumulative_volume_shares"],
+                row["quote_status"],
+                row["upper_limit_cny"],
+                row["lower_limit_cny"],
+                ensure_aware_shanghai(row["available_at"]),
+                row["source"],
+                row.get("ingested_at", now),
+            )
+            for row in rows
+        ]
+        if not values:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO staging_market_open_snapshots
+               (run_id, symbol, trade_date, observed_at, open_cny, prev_close_cny,
+                last_cny, cumulative_volume_shares, quote_status, upper_limit_cny,
+                lower_limit_cny, available_at, source, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+
     def upsert_staging_financials(self, run_id: str, rows: Iterable[dict]) -> None:
         now = datetime.now(tz=SHANGHAI)
         open_dates = self.list_open_trade_dates()
@@ -647,6 +720,12 @@ class MarketDataRepository:
                 row["available_at"],
                 row["source"],
                 row.get("ingested_at", now),
+                row.get("corporate_action_id"),
+                row.get("announcement_at"),
+                row.get("record_date"),
+                row.get("pay_date"),
+                row.get("source_version"),
+                row.get("supersedes_action_id"),
             )
             for row in rows
         ]
@@ -655,8 +734,10 @@ class MarketDataRepository:
         self.connection.executemany(
             """INSERT OR REPLACE INTO staging_corporate_actions
                (run_id, symbol, ex_date, action_type, cash_div, stock_div,
-                split_ratio, rights_ratio, available_at, source, ingested_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                split_ratio, rights_ratio, available_at, source, ingested_at,
+                corporate_action_id, announcement_at, record_date, pay_date,
+                source_version, supersedes_action_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             values,
         )
 
@@ -755,6 +836,11 @@ class MarketDataRepository:
             if errors:
                 raise ValueError(f"daily indicator quality gate failed: {'; '.join(errors)}")
             self._copy_staging_daily_indicators(run_id, version_id)
+        elif dataset == "market_open_snapshots":
+            errors = self._validate_staging_market_open_snapshots(run_id)
+            if errors:
+                raise ValueError(f"market open snapshot quality gate failed: {'; '.join(errors)}")
+            self._copy_staging_market_open_snapshots(run_id, version_id)
         else:
             raise ValueError(f"unsupported dataset for publish: {dataset}")
 
@@ -815,7 +901,9 @@ class MarketDataRepository:
             ).fetchall()
             action_rows = self.connection.execute(
                 """SELECT symbol, ex_date, action_type, cash_div, stock_div,
-                          split_ratio, rights_ratio, available_at, source
+                          split_ratio, rights_ratio, available_at, source,
+                          corporate_action_id, announcement_at, record_date, pay_date,
+                          source_version, supersedes_action_id
                    FROM staging_corporate_actions WHERE run_id = ?
                    ORDER BY symbol, ex_date, action_type""",
                 [run_id],
@@ -845,6 +933,25 @@ class MarketDataRepository:
                           total_market_cap_cny, float_market_cap_cny, available_at, source
                    FROM staging_daily_indicators WHERE run_id = ?
                    ORDER BY symbol, trade_date, source""",
+                [run_id],
+            ).fetchall()
+        elif dataset == "market_open_snapshots":
+            params_row = self.connection.execute(
+                "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            params = json.loads(params_row[0]) if params_row else {}
+            if params.get("success_empty"):
+                return _hash_payload({
+                    "trade_date": params.get("trade_date"),
+                    "observed_at": params.get("observed_at"),
+                    "symbols": params.get("symbols"),
+                    "success_empty": True,
+                })
+            rows = self.connection.execute(
+                f"""SELECT {', '.join(_MARKET_OPEN_SNAPSHOT_COLUMNS)}
+                   FROM staging_market_open_snapshots WHERE run_id = ?
+                   ORDER BY symbol, observed_at, source""",
                 [run_id],
             ).fetchall()
         else:
@@ -945,7 +1052,9 @@ class MarketDataRepository:
     def _copy_staging_corporate_actions(self, run_id: str, version_id: str) -> None:
         staging_rows = self.connection.execute(
             """SELECT symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
-                      rights_ratio, available_at, source, ingested_at
+                      rights_ratio, available_at, source, ingested_at,
+                      corporate_action_id, announcement_at, record_date, pay_date,
+                      source_version, supersedes_action_id
                FROM staging_corporate_actions WHERE run_id = ?""",
             [run_id],
         ).fetchall()
@@ -954,9 +1063,18 @@ class MarketDataRepository:
         self.connection.executemany(
             """INSERT OR REPLACE INTO corporate_actions
                (symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
-                rights_ratio, available_at, source, ingested_at, dataset_version_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [(*row[:10], version_id) for row in staging_rows],
+                rights_ratio, available_at, source, ingested_at, dataset_version_id,
+                corporate_action_id, announcement_at, record_date, pay_date,
+                source_version, supersedes_action_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+                    row[8], row[9], version_id, row[10], row[11], row[12], row[13],
+                    row[14], row[15],
+                )
+                for row in staging_rows
+            ],
         )
 
     def _copy_staging_board_memberships(self, run_id: str, version_id: str) -> None:
@@ -994,6 +1112,23 @@ class MarketDataRepository:
                 ingested_at, dataset_version_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(*row[:10], version_id) for row in staging_rows],
+        )
+
+    def _copy_staging_market_open_snapshots(self, run_id: str, version_id: str) -> None:
+        staging_rows = self.connection.execute(
+            f"""SELECT {', '.join(_MARKET_OPEN_SNAPSHOT_COLUMNS)}, ingested_at
+               FROM staging_market_open_snapshots WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        if not staging_rows:
+            return
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO market_open_snapshots
+               (symbol, trade_date, observed_at, open_cny, prev_close_cny, last_cny,
+                cumulative_volume_shares, quote_status, upper_limit_cny, lower_limit_cny,
+                available_at, source, ingested_at, dataset_version_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(*row[:13], version_id) for row in staging_rows],
         )
 
     def _validate_staging_daily_indicators(self, run_id: str) -> list[str]:
@@ -1037,10 +1172,54 @@ class MarketDataRepository:
             ]
         return []
 
+    def _validate_staging_market_open_snapshots(self, run_id: str) -> list[str]:
+        run = self.connection.execute(
+            "SELECT params_json FROM ingestion_runs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        if run is None:
+            return [f"unknown ingestion run {run_id}"]
+        params = json.loads(run[0])
+        trade_date = _parse_sync_window_date(params.get("trade_date"))
+        if trade_date is None:
+            return ["missing trade_date in ingestion params"]
+        observed_at_raw = params.get("observed_at")
+        if not observed_at_raw:
+            return ["missing observed_at in ingestion params"]
+        observed_at = datetime.fromisoformat(observed_at_raw)
+        requested_symbols = params.get("symbols") or []
+        if params.get("success_empty"):
+            staging_rows = self.connection.execute(
+                "SELECT 1 FROM staging_market_open_snapshots WHERE run_id = ? LIMIT 1",
+                [run_id],
+            ).fetchone()
+            if staging_rows is not None:
+                return ["success_empty sync must not contain staging rows"]
+            return []
+        staging_rows = self.connection.execute(
+            f"""SELECT {', '.join(_MARKET_OPEN_SNAPSHOT_COLUMNS)}
+               FROM staging_market_open_snapshots WHERE run_id = ?""",
+            [run_id],
+        ).fetchall()
+        columns = list(_MARKET_OPEN_SNAPSHOT_COLUMNS)
+        rows = [dict(zip(columns, row)) for row in staging_rows]
+        issues = assess_market_open_snapshot_quality(
+            rows,
+            trade_date,
+            observed_at,
+            requested_symbols=requested_symbols,
+        )
+        if issues:
+            return [issue.detail for issue in issues]
+        return []
+
     def _clear_staging_for_run(self, run_id: str) -> None:
         self.connection.execute("DELETE FROM staging_daily_bars WHERE run_id = ?", [run_id])
         self.connection.execute(
             "DELETE FROM staging_daily_indicators WHERE run_id = ?", [run_id]
+        )
+        self.connection.execute(
+            "DELETE FROM staging_market_open_snapshots WHERE run_id = ?", [run_id]
         )
         self.connection.execute("DELETE FROM staging_securities WHERE run_id = ?", [run_id])
         self.connection.execute(
@@ -1925,6 +2104,12 @@ class MarketDataRepository:
                 row["source"],
                 row.get("ingested_at", datetime.now(tz=SHANGHAI)),
                 row.get("dataset_version_id"),
+                row.get("corporate_action_id"),
+                row.get("announcement_at"),
+                row.get("record_date"),
+                row.get("pay_date"),
+                row.get("source_version"),
+                row.get("supersedes_action_id"),
             )
             for row in rows
         ]
@@ -1933,8 +2118,10 @@ class MarketDataRepository:
         self.connection.executemany(
             """INSERT OR REPLACE INTO corporate_actions
                (symbol, ex_date, action_type, cash_div, stock_div, split_ratio,
-                rights_ratio, available_at, source, ingested_at, dataset_version_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rights_ratio, available_at, source, ingested_at, dataset_version_id,
+                corporate_action_id, announcement_at, record_date, pay_date,
+                source_version, supersedes_action_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             values,
         )
 
@@ -1951,7 +2138,9 @@ class MarketDataRepository:
         params: list = list(symbols)
         query = f"""
             SELECT a.symbol, a.ex_date, a.action_type, a.cash_div, a.stock_div,
-                   a.split_ratio, a.rights_ratio, a.available_at, a.source
+                   a.split_ratio, a.rights_ratio, a.available_at, a.source,
+                   a.corporate_action_id, a.announcement_at, a.record_date, a.pay_date,
+                   a.source_version, a.supersedes_action_id
             FROM corporate_actions a
             LEFT JOIN dataset_versions v ON a.dataset_version_id = v.version_id
             WHERE a.symbol IN ({placeholders})
@@ -1967,6 +2156,8 @@ class MarketDataRepository:
         columns = [
             "symbol", "ex_date", "action_type", "cash_div", "stock_div",
             "split_ratio", "rights_ratio", "available_at", "source",
+            "corporate_action_id", "announcement_at", "record_date", "pay_date",
+            "source_version", "supersedes_action_id",
         ]
         rows = self.connection.execute(query, params).fetchall()
         return [dict(zip(columns, row)) for row in rows]

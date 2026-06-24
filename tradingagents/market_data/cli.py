@@ -13,6 +13,7 @@ from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.providers.factory import create_resolved_provider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
+from tradingagents.market_data.market_hours import market_open_observed_at
 from tradingagents.market_data.sync_policy import shanghai_today
 
 app = typer.Typer(help="TradingAgents market data sync")
@@ -102,6 +103,21 @@ def sync_dataset(
     elif dataset in {"daily-indicators", "daily_indicators"}:
         trade_date = date.fromisoformat(start or as_of or shanghai_today().isoformat())
         result = sync.sync_daily_indicators(trade_date)
+    elif dataset in {"market-open-snapshots", "market_open_snapshots"}:
+        trade_date = date.fromisoformat(start or as_of or shanghai_today().isoformat())
+        if not symbols:
+            raise typer.BadParameter("market-open-snapshots requires --symbols")
+        observed_raw = end or as_of
+        observed_at = (
+            datetime.fromisoformat(observed_raw)
+            if observed_raw
+            else market_open_observed_at(trade_date)
+        )
+        result = sync.sync_market_open_snapshots(
+            _parse_symbols(symbols),
+            trade_date,
+            observed_at,
+        )
     elif dataset == "memberships":
         if not as_of or not board_type or not board_code:
             raise typer.BadParameter(
@@ -177,6 +193,7 @@ def sync_status(
         "trade_calendar": repo.get_latest_published_version("trade_calendar"),
         "daily_bars": repo.get_latest_published_version("daily_bars"),
         "daily_indicators": repo.get_latest_published_version("daily_indicators"),
+        "market_open_snapshots": repo.get_latest_published_version("market_open_snapshots"),
         "capability_probe": repo.get_capability_probe(),
     }, ensure_ascii=False, default=str))
 

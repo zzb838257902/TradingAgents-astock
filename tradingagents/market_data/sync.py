@@ -9,12 +9,13 @@ from typing import Any
 
 from tradingagents.market_data.config import MarketDataPaths
 from tradingagents.market_data.contracts import DataResult, DataStatus
-from tradingagents.market_data.market_hours import SHANGHAI, post_close_signal_time
+from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai, post_close_signal_time
 from tradingagents.market_data.providers.base import MarketDataProvider
 from tradingagents.market_data.quality import (
     CoverageReport,
     assess_daily_bar_quality,
     assess_daily_indicator_quality,
+    assess_market_open_snapshot_quality,
     build_backfill_completeness_report,
     build_daily_completeness_report,
     build_daily_indicator_completeness_report,
@@ -493,6 +494,136 @@ class MarketDataSync:
             version_id=version_id,
             content_hash=published["content_hash"] if published else None,
             coverage_reports={"daily_indicator_completeness": coverage},
+        )
+
+    def sync_market_open_snapshots(
+        self,
+        symbols: list[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> SyncResult:
+        blocked = self._require_open_trade_date(trade_date, "market_open_snapshots")
+        if blocked is not None:
+            return blocked
+
+        cutoff = ensure_aware_shanghai(observed_at)
+        requested = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+        if not requested:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=["empty symbol list for market_open_snapshots"],
+            )
+
+        fetched = self.provider.get_market_open_snapshots(requested, trade_date, cutoff)
+        if fetched.status == DataStatus.NOT_AVAILABLE_YET:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=fetched.errors or [fetched.status.value],
+            )
+        if fetched.status not in {DataStatus.OK, DataStatus.SUCCESS_EMPTY}:
+            return self._error_result("market_open_snapshots", fetched)
+
+        run_time = datetime.now(tz=SHANGHAI)
+        if fetched.status == DataStatus.SUCCESS_EMPTY and not (fetched.data or []):
+            if getattr(self.provider, "name", "") != "fixture":
+                return SyncResult(
+                    dataset="market_open_snapshots",
+                    status=SyncStatus.BLOCKED,
+                    errors=fetched.errors or [
+                        "SUCCESS_EMPTY requires fixture supplier confirmation; "
+                        "refusing to publish unverified empty open snapshots",
+                    ],
+                )
+            run_id = self.repository.begin_ingestion_run(
+                "market_open_snapshots",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "observed_at": cutoff.isoformat(),
+                    "symbols": requested,
+                    "success_empty": True,
+                },
+            )
+            self._save_snapshot(
+                "market_open_snapshots",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "observed_at": cutoff.isoformat(),
+                    "symbols": requested,
+                },
+                {"rows": [], "success_empty": True},
+            )
+            try:
+                version_id = self.repository.publish_dataset_version(run_id)
+            except ValueError as exc:
+                self.repository.mark_ingestion_failed(run_id, str(exc))
+                return SyncResult(
+                    dataset="market_open_snapshots",
+                    status=SyncStatus.ERROR,
+                    run_id=run_id,
+                    errors=[str(exc)],
+                )
+            published = self.repository.get_latest_published_version("market_open_snapshots")
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.PUBLISHED,
+                run_id=run_id,
+                version_id=version_id,
+                content_hash=published["content_hash"] if published else None,
+            )
+
+        rows = fetched.data or []
+        for row in rows:
+            row.setdefault("ingested_at", run_time)
+        issues = assess_market_open_snapshot_quality(
+            rows,
+            trade_date,
+            cutoff,
+            requested_symbols=requested,
+        )
+        if issues:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+
+        run_id = self.repository.begin_ingestion_run(
+            "market_open_snapshots",
+            {
+                "trade_date": trade_date.isoformat(),
+                "observed_at": cutoff.isoformat(),
+                "symbols": requested,
+            },
+        )
+        self.repository.upsert_staging_market_open_snapshots(run_id, rows)
+        self._save_snapshot(
+            "market_open_snapshots",
+            {
+                "trade_date": trade_date.isoformat(),
+                "observed_at": cutoff.isoformat(),
+                "symbols": requested,
+            },
+            rows,
+        )
+        try:
+            version_id = self.repository.publish_dataset_version(run_id)
+        except ValueError as exc:
+            self.repository.mark_ingestion_failed(run_id, str(exc))
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.ERROR,
+                run_id=run_id,
+                errors=[str(exc)],
+            )
+        published = self.repository.get_latest_published_version("market_open_snapshots")
+        return SyncResult(
+            dataset="market_open_snapshots",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
         )
 
     def sync_daily_backfill(

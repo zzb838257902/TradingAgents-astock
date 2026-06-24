@@ -165,3 +165,50 @@ class DailyIndicator(BaseModel):
     source: str
     ingested_at: datetime | None = None
     dataset_version_id: str | None = None
+
+
+class QuoteStatus(StrEnum):
+    TRADING = "trading"
+    SUSPENDED = "suspended"
+    HALTED = "halted"
+    UNKNOWN = "unknown"
+
+
+class MarketOpenSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    trade_date: date
+    observed_at: datetime
+    open_cny: float
+    prev_close_cny: float
+    last_cny: float
+    cumulative_volume_shares: int
+    quote_status: QuoteStatus
+    upper_limit_cny: float
+    lower_limit_cny: float
+    source: str
+    available_at: datetime
+    dataset_version_id: str | None = None
+
+
+class CorporateActionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    corporate_action_id: str
+    symbol: str
+    ex_date: date
+    action_type: str
+    available_at: datetime
+    source: str
+    cash_div: float | None = None
+    stock_div: float | None = None
+    split_ratio: float | None = None
+    rights_ratio: float | None = None
+    announcement_at: datetime | None = None
+    record_date: date | None = None
+    pay_date: date | None = None
+    source_version: str | None = None
+    supersedes_action_id: str | None = None
+    ingested_at: datetime | None = None
+    dataset_version_id: str | None = None

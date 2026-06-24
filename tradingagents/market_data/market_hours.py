@@ -13,6 +13,11 @@ def post_close_signal_time(signal_date: date) -> datetime:
     return datetime.combine(signal_date, time(15, 30), tzinfo=SHANGHAI)
 
 
+def market_open_observed_at(trade_date: date) -> datetime:
+    """Default T+1 opening snapshot observation time (09:35 Shanghai)."""
+    return datetime.combine(trade_date, time(9, 35), tzinfo=SHANGHAI)
+
+
 def bar_available_at(trade_date: date) -> datetime:
     """Daily bar visible after the cash session close."""
     return post_close_signal_time(trade_date)

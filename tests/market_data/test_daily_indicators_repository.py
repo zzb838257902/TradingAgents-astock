@@ -46,7 +46,7 @@ def test_daily_indicator_rejects_non_canonical_unit_fields():
 def test_fresh_database_has_daily_indicator_tables(tmp_path):
     db_path = tmp_path / "market.duckdb"
     apply_migrations(db_path)
-    assert CURRENT_SCHEMA_VERSION == 11
+    assert CURRENT_SCHEMA_VERSION == 12
     connection = duckdb.connect(str(db_path))
     try:
         tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
