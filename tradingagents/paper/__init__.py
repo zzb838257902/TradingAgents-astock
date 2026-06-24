@@ -27,6 +27,11 @@ from tradingagents.paper.exceptions import (
 )
 from tradingagents.paper.invariants import InvariantViolation, assert_account_invariants
 from tradingagents.paper.locking import AccountLease, acquire_account_lease, take_over_expired_lease, validate_fencing
+from tradingagents.paper.corporate_actions import (
+    CorporateActionApplicationResult,
+    CorporateActionProcessor,
+    CorporateActionStatus,
+)
 from tradingagents.paper.execution import (
     ExecutionAccountState,
     OrderExecutionResult,
@@ -36,6 +41,13 @@ from tradingagents.paper.execution import (
 from tradingagents.paper.fees import FeeBreakdown, FeeConfig, calculate_fees
 from tradingagents.paper.planner import RebalancePlan, RebalancePlanner
 from tradingagents.paper.screening import ScreeningService
+from tradingagents.paper.valuation import (
+    MarkToMarketService,
+    ValuationDataError,
+    ValuationResult,
+    ValuationSourceRow,
+    ValuationStatus,
+)
 from tradingagents.paper.repository import (
     AccountProjection,
     AccountSnapshot,
@@ -47,7 +59,11 @@ from tradingagents.paper.repository import (
 
 __all__ = [
     "MONEY_QUANTUM",
+    "MarkToMarketService",
     "PRICE_QUANTUM",
+    "CorporateActionApplicationResult",
+    "CorporateActionProcessor",
+    "CorporateActionStatus",
     "AccountLease",
     "AccountNotFound",
     "AccountProjection",
@@ -83,6 +99,10 @@ __all__ = [
     "StaleFencingToken",
     "StepStatus",
     "TargetPortfolioMode",
+    "ValuationDataError",
+    "ValuationResult",
+    "ValuationSourceRow",
+    "ValuationStatus",
     "acquire_account_lease",
     "assert_account_invariants",
     "calculate_fees",

@@ -238,8 +238,13 @@ def seed_partial_execution_orders(
     repo.expire_lease_for_test(account_id)
 
 
-def seed_demo_account(repo: PaperRepository, *, account_id: str = "demo") -> None:
-    repo.create_account(account_id, Decimal("1000000.00"))
+def seed_demo_account(
+    repo: PaperRepository,
+    *,
+    account_id: str = "demo",
+    initial_cash: Decimal = Decimal("1000000.00"),
+) -> None:
+    repo.create_account(account_id, initial_cash)
 
 
 def seed_execution_orders(

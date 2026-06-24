@@ -24,6 +24,7 @@ from tests.paper.conftest import (
     EXECUTION_TIME,
     SIGNAL_TIME,
     TRADE_DATE,
+    acquire_test_lease,
     append_cash_with_lease,
     append_position_with_lease,
     cash_entry,
@@ -251,6 +252,7 @@ def test_fault_injection_before_projection_rolls_back(repo):
 
 def test_write_valuation_persists_nav(repo):
     repo.create_account("demo", Decimal("1000000.00"))
+    lease = acquire_test_lease(repo)
     nav = repo.write_valuation(
         ValuationWriteSpec(
             account_id="demo",
@@ -258,7 +260,9 @@ def test_write_valuation_persists_nav(repo):
             cash_cny=Decimal("1000000.00"),
             positions_value_cny=Decimal("0.00"),
             total_equity_cny=Decimal("1000000.00"),
-        )
+        ),
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
     )
     assert nav.total_equity_cny == Decimal("1000000.00")
     assert_account_invariants(repo.connection, "demo")
@@ -269,6 +273,7 @@ def test_apply_corporate_action_stub(repo):
     from tradingagents.paper.contracts import CorporateActionApplicationStatus
     from tradingagents.paper.repository import CorporateActionApplicationSpec
 
+    lease = acquire_test_lease(repo)
     key = repo.apply_corporate_action(
         CorporateActionApplicationSpec(
             account_id="demo",
@@ -277,7 +282,9 @@ def test_apply_corporate_action_stub(repo):
             entitlement_quantity=1000,
             entitlement_source_hash="hash-1",
             status=CorporateActionApplicationStatus.PENDING,
-        )
+        ),
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
     )
     assert key == "demo:ca-div-1:1"
 

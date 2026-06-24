@@ -162,6 +162,13 @@ class ValuationWriteSpec:
     valuation_manifest_hash: str | None = None
 
 
+@dataclass(frozen=True)
+class NavHistoryContext:
+    latest: NavSnapshot | None
+    peak_equity_cny: Decimal
+    initial_equity_cny: Decimal
+
+
 def _decimal(value: object) -> Decimal:
     if isinstance(value, Decimal):
         return value
@@ -1895,112 +1902,475 @@ class PaperRepository:
             positions=projection.positions,
         )
 
-    def apply_corporate_action(self, spec: CorporateActionApplicationSpec) -> str:
+    def apply_corporate_action(
+        self,
+        spec: CorporateActionApplicationSpec,
+        *,
+        fencing_token: int,
+        owner_id: str,
+        position_entry: PositionEntry | None = None,
+        cash_entry: CashEntry | None = None,
+        lot_multiplier: Decimal | None = None,
+        lot_target_total: int | None = None,
+        effective_date: date | None = None,
+    ) -> str:
         applied_at = datetime.now(tz=SHANGHAI)
-        self.connection.execute("BEGIN")
-        try:
-            self.connection.execute(
-                """
-                UPDATE paper_corporate_action_applications
-                SET is_active_revision = FALSE,
-                    active_revision_slot = revision
-                WHERE account_id = ? AND corporate_action_id = ? AND is_active_revision = TRUE
-                """,
-                [spec.account_id, spec.corporate_action_id],
-            )
-            self.connection.execute(
-                """
-                INSERT INTO paper_corporate_action_applications (
-                    account_id, corporate_action_id, revision, entitlement_quantity,
-                    entitlement_source_hash, status, applied_at,
-                    is_active_revision, active_revision_slot
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, 0)
-                ON CONFLICT (account_id, corporate_action_id, revision) DO NOTHING
-                """,
-                [
-                    spec.account_id,
-                    spec.corporate_action_id,
-                    spec.revision,
-                    spec.entitlement_quantity,
-                    spec.entitlement_source_hash,
-                    spec.status.value,
-                    applied_at if spec.status == CorporateActionApplicationStatus.APPLIED else None,
-                ],
-            )
-            self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
-        return f"{spec.account_id}:{spec.corporate_action_id}:{spec.revision}"
+        position_entry_id: str | None = None
+        cash_entry_id: str | None = None
+        with account_transaction_lock(self.paths.home_dir, spec.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                existing = self.connection.execute(
+                    """
+                    SELECT revision, status, entitlement_quantity, entitlement_source_hash
+                    FROM paper_corporate_action_applications
+                    WHERE account_id = ? AND corporate_action_id = ?
+                      AND is_active_revision = TRUE
+                    """,
+                    [spec.account_id, spec.corporate_action_id],
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing[1] == spec.status.value
+                        and int(existing[2]) == spec.entitlement_quantity
+                        and existing[3] == spec.entitlement_source_hash
+                    ):
+                        self.connection.execute("COMMIT")
+                        return f"{spec.account_id}:{spec.corporate_action_id}:{existing[0]}"
+                    if existing[1] == CorporateActionApplicationStatus.APPLIED.value:
+                        self.connection.execute("COMMIT")
+                        return f"{spec.account_id}:{spec.corporate_action_id}:{existing[0]}"
 
-    def write_valuation(self, spec: ValuationWriteSpec) -> NavSnapshot:
-        created_at = datetime.now(tz=SHANGHAI)
-        self.connection.execute("BEGIN")
-        try:
-            self.connection.execute(
-                """
-                INSERT INTO paper_nav_snapshots (
-                    account_id, valuation_date, cash_cny, positions_value_cny,
-                    total_equity_cny, daily_return, cumulative_return, drawdown,
-                    valuation_manifest_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (account_id, valuation_date) DO UPDATE SET
-                    cash_cny = excluded.cash_cny,
-                    positions_value_cny = excluded.positions_value_cny,
-                    total_equity_cny = excluded.total_equity_cny,
-                    daily_return = excluded.daily_return,
-                    cumulative_return = excluded.cumulative_return,
-                    drawdown = excluded.drawdown,
-                    valuation_manifest_hash = excluded.valuation_manifest_hash,
-                    created_at = excluded.created_at
-                """,
-                [
-                    spec.account_id,
-                    spec.valuation_date,
-                    money(spec.cash_cny),
-                    money(spec.positions_value_cny),
-                    money(spec.total_equity_cny),
-                    spec.daily_return,
-                    spec.cumulative_return,
-                    spec.drawdown,
-                    spec.valuation_manifest_hash,
-                    created_at,
-                ],
-            )
-            for source in spec.sources:
                 self.connection.execute(
                     """
-                    INSERT INTO paper_valuation_sources (
-                        account_id, valuation_date, symbol, quantity, price_cny,
-                        price_status, source_row_key, dataset_version_id,
-                        row_content_hash, available_at
+                    UPDATE paper_corporate_action_applications
+                    SET is_active_revision = FALSE,
+                        active_revision_slot = revision
+                    WHERE account_id = ? AND corporate_action_id = ? AND is_active_revision = TRUE
+                    """,
+                    [spec.account_id, spec.corporate_action_id],
+                )
+
+                if (
+                    spec.status == CorporateActionApplicationStatus.APPLIED
+                    and lot_multiplier is not None
+                    and lot_target_total is not None
+                    and position_entry is not None
+                ):
+                    self._adjust_lots_for_multiplier(
+                        spec.account_id,
+                        position_entry.symbol,
+                        multiplier=lot_multiplier,
+                        target_total=lot_target_total,
+                    )
+                    position_entry_id = self._insert_position_entry_in_tx(position_entry)
+                    self._rebuild_positions_projection(
+                        spec.account_id,
+                        effective_date or position_entry.effective_date,
+                    )
+
+                if (
+                    spec.status == CorporateActionApplicationStatus.APPLIED
+                    and cash_entry is not None
+                ):
+                    cash_entry_id = self._append_cash_entry_in_tx(cash_entry)
+                    rebuild_date = effective_date or cash_entry.occurred_at.date()
+                    self._rebuild_positions_projection(spec.account_id, rebuild_date)
+
+                self.connection.execute(
+                    """
+                    INSERT INTO paper_corporate_action_applications (
+                        account_id, corporate_action_id, revision, entitlement_quantity,
+                        entitlement_source_hash, status, position_entry_id, cash_entry_id,
+                        applied_at, is_active_revision, active_revision_slot
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 0)
+                    ON CONFLICT (account_id, corporate_action_id, revision) DO NOTHING
+                    """,
+                    [
+                        spec.account_id,
+                        spec.corporate_action_id,
+                        spec.revision,
+                        spec.entitlement_quantity,
+                        spec.entitlement_source_hash,
+                        spec.status.value,
+                        position_entry_id,
+                        cash_entry_id,
+                        applied_at
+                        if spec.status == CorporateActionApplicationStatus.APPLIED
+                        else None,
+                    ],
+                )
+                if spec.status == CorporateActionApplicationStatus.APPLIED:
+                    assert_account_invariants(
+                        self.connection,
+                        spec.account_id,
+                        as_of_date=effective_date,
+                    )
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+        return f"{spec.account_id}:{spec.corporate_action_id}:{spec.revision}"
+
+    def _adjust_lots_for_multiplier(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        multiplier: Decimal,
+        target_total: int,
+    ) -> None:
+        rows = self.connection.execute(
+            """
+            SELECT lot_id, remaining_quantity
+            FROM paper_lots
+            WHERE account_id = ? AND symbol = ? AND closed_at IS NULL
+            ORDER BY acquired_date, created_at, lot_id
+            """,
+            [account_id, symbol],
+        ).fetchall()
+        if not rows:
+            raise InvalidExecutionBatch(f"no open lots for {symbol}")
+        allocations: list[tuple[str, int, int]] = []
+        allocated = 0
+        for lot_id, remaining in rows:
+            remaining = int(remaining)
+            new_qty = int(Decimal(remaining) * multiplier)
+            allocations.append((lot_id, remaining, new_qty))
+            allocated += new_qty
+        remainder = target_total - allocated
+        if remainder < 0:
+            raise InvalidExecutionBatch(
+                f"lot adjustment overshoot for {symbol}: {allocated} > {target_total}"
+            )
+        if remainder > 0:
+            lot_id, remaining, new_qty = allocations[0]
+            allocations[0] = (lot_id, remaining, new_qty + remainder)
+        now = datetime.now(tz=SHANGHAI)
+        for lot_id, old_qty, new_qty in allocations:
+            if new_qty == old_qty:
+                continue
+            if new_qty <= 0:
+                self.connection.execute(
+                    """
+                    UPDATE paper_lots
+                    SET remaining_quantity = 0, closed_at = ?
+                    WHERE lot_id = ?
+                    """,
+                    [now, lot_id],
+                )
+            else:
+                self.connection.execute(
+                    """
+                    UPDATE paper_lots
+                    SET remaining_quantity = ?
+                    WHERE lot_id = ?
+                    """,
+                    [new_qty, lot_id],
+                )
+
+    def cash_on(self, account_id: str, as_of_date: date) -> Decimal:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(amount_cny), 0)
+            FROM paper_cash_ledger
+            WHERE account_id = ? AND CAST(occurred_at AS DATE) <= ?
+            """,
+            [account_id, as_of_date],
+        ).fetchone()
+        return money(_decimal(row[0]))
+
+    def cash_entries_for(self, account_id: str, source_id: str) -> list[CashEntry]:
+        rows = self.connection.execute(
+            """
+            SELECT cash_entry_id, account_id, entry_type, amount_cny, source_type,
+                   source_id, component, occurred_at, balance_after_cny, created_at
+            FROM paper_cash_ledger
+            WHERE account_id = ? AND source_id = ?
+            ORDER BY occurred_at, cash_entry_id
+            """,
+            [account_id, source_id],
+        ).fetchall()
+        return [
+            CashEntry(
+                cash_entry_id=row[0],
+                account_id=row[1],
+                entry_type=row[2],
+                amount_cny=money(_decimal(row[3])),
+                source_type=row[4],
+                source_id=row[5],
+                component=row[6],
+                occurred_at=row[7],
+                balance_after_cny=money(_decimal(row[8])) if row[8] is not None else None,
+                created_at=row[9],
+            )
+            for row in rows
+        ]
+
+    def position_quantity_on(
+        self,
+        account_id: str,
+        symbol: str,
+        as_of_date: date,
+    ) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(quantity_delta), 0)
+            FROM paper_position_ledger
+            WHERE account_id = ? AND symbol = ? AND effective_date <= ?
+            """,
+            [account_id, symbol, as_of_date],
+        ).fetchone()
+        return int(row[0])
+
+    def get_active_corporate_action_application(
+        self,
+        account_id: str,
+        corporate_action_id: str,
+    ) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """
+            SELECT revision, status, entitlement_quantity, entitlement_source_hash
+            FROM paper_corporate_action_applications
+            WHERE account_id = ? AND corporate_action_id = ? AND is_active_revision = TRUE
+            """,
+            [account_id, corporate_action_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "revision": row[0],
+            "status": row[1],
+            "entitlement_quantity": row[2],
+            "entitlement_source_hash": row[3],
+        }
+
+    def get_nav_history_context(
+        self,
+        account_id: str,
+        valuation_date: date,
+    ) -> NavHistoryContext:
+        rows = self.connection.execute(
+            """
+            SELECT valuation_date, cash_cny, positions_value_cny, total_equity_cny,
+                   daily_return, cumulative_return, drawdown,
+                   valuation_manifest_hash, created_at
+            FROM paper_nav_snapshots
+            WHERE account_id = ? AND valuation_date < ?
+            ORDER BY valuation_date
+            """,
+            [account_id, valuation_date],
+        ).fetchall()
+        latest: NavSnapshot | None = None
+        peak = Decimal("0")
+        initial = Decimal("0")
+        for index, row in enumerate(rows):
+            nav = NavSnapshot(
+                account_id=account_id,
+                valuation_date=row[0],
+                cash_cny=money(_decimal(row[1])),
+                positions_value_cny=money(_decimal(row[2])),
+                total_equity_cny=money(_decimal(row[3])),
+                daily_return=_decimal(row[4]) if row[4] is not None else None,
+                cumulative_return=_decimal(row[5]) if row[5] is not None else None,
+                drawdown=_decimal(row[6]) if row[6] is not None else None,
+                valuation_manifest_hash=row[7],
+                created_at=row[8],
+            )
+            latest = nav
+            peak = max(peak, nav.total_equity_cny)
+            if index == 0:
+                initial = nav.total_equity_cny
+        if latest is None:
+            account_row = self.connection.execute(
+                "SELECT initial_cash_cny FROM paper_accounts WHERE account_id = ?",
+                [account_id],
+            ).fetchone()
+            initial = money(_decimal(account_row[0])) if account_row else money(0)
+            peak = initial
+        return NavHistoryContext(
+            latest=latest,
+            peak_equity_cny=money(peak),
+            initial_equity_cny=money(initial),
+        )
+
+    def initial_equity(self, account_id: str) -> Decimal:
+        row = self.connection.execute(
+            """
+            SELECT total_equity_cny
+            FROM paper_nav_snapshots
+            WHERE account_id = ?
+            ORDER BY valuation_date ASC
+            LIMIT 1
+            """,
+            [account_id],
+        ).fetchone()
+        if row is not None:
+            return money(_decimal(row[0]))
+        account_row = self.connection.execute(
+            "SELECT initial_cash_cny FROM paper_accounts WHERE account_id = ?",
+            [account_id],
+        ).fetchone()
+        if account_row is None:
+            raise AccountNotFound(f"account {account_id} not found")
+        return money(_decimal(account_row[0]))
+
+    def update_position_marks(
+        self,
+        account_id: str,
+        *,
+        valuation_date: date,
+        marks: dict[str, Decimal],
+        fencing_token: int,
+        owner_id: str,
+    ) -> None:
+        now = datetime.now(tz=SHANGHAI)
+        with account_transaction_lock(self.paths.home_dir, account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                for symbol, price in marks.items():
+                    row = self.connection.execute(
+                        """
+                        SELECT quantity, average_cost_cny
+                        FROM paper_positions
+                        WHERE account_id = ? AND symbol = ?
+                        """,
+                        [account_id, symbol],
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    quantity = int(row[0])
+                    average_cost = money(_decimal(row[1]))
+                    market_value = money(price * Decimal(quantity))
+                    cost_basis = money(average_cost * Decimal(quantity))
+                    unrealized = money(market_value - cost_basis)
+                    self.connection.execute(
+                        """
+                        UPDATE paper_positions
+                        SET last_price_cny = ?,
+                            market_value_cny = ?,
+                            unrealized_pnl_cny = ?,
+                            updated_at = ?
+                        WHERE account_id = ? AND symbol = ?
+                        """,
+                        [price, market_value, unrealized, now, account_id, symbol],
+                    )
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+
+    def write_valuation(
+        self,
+        spec: ValuationWriteSpec,
+        *,
+        fencing_token: int,
+        owner_id: str,
+    ) -> NavSnapshot:
+        created_at = datetime.now(tz=SHANGHAI)
+        with account_transaction_lock(self.paths.home_dir, spec.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO paper_nav_snapshots (
+                        account_id, valuation_date, cash_cny, positions_value_cny,
+                        total_equity_cny, daily_return, cumulative_return, drawdown,
+                        valuation_manifest_hash, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (account_id, valuation_date, symbol) DO UPDATE SET
-                        quantity = excluded.quantity,
-                        price_cny = excluded.price_cny,
-                        price_status = excluded.price_status,
-                        source_row_key = excluded.source_row_key,
-                        dataset_version_id = excluded.dataset_version_id,
-                        row_content_hash = excluded.row_content_hash,
-                        available_at = excluded.available_at
+                    ON CONFLICT (account_id, valuation_date) DO UPDATE SET
+                        cash_cny = excluded.cash_cny,
+                        positions_value_cny = excluded.positions_value_cny,
+                        total_equity_cny = excluded.total_equity_cny,
+                        daily_return = excluded.daily_return,
+                        cumulative_return = excluded.cumulative_return,
+                        drawdown = excluded.drawdown,
+                        valuation_manifest_hash = excluded.valuation_manifest_hash,
+                        created_at = excluded.created_at
                     """,
                     [
                         spec.account_id,
                         spec.valuation_date,
-                        source["symbol"],
-                        source["quantity"],
-                        source["price_cny"],
-                        source["price_status"],
-                        source["source_row_key"],
-                        source.get("dataset_version_id"),
-                        source["row_content_hash"],
-                        source["available_at"],
+                        money(spec.cash_cny),
+                        money(spec.positions_value_cny),
+                        money(spec.total_equity_cny),
+                        spec.daily_return,
+                        spec.cumulative_return,
+                        spec.drawdown,
+                        spec.valuation_manifest_hash,
+                        created_at,
                     ],
                 )
-            self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
+                for source in spec.sources:
+                    self.connection.execute(
+                        """
+                        INSERT INTO paper_valuation_sources (
+                            account_id, valuation_date, symbol, quantity, price_cny,
+                            price_status, source_row_key, dataset_version_id,
+                            row_content_hash, available_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (account_id, valuation_date, symbol) DO UPDATE SET
+                            quantity = excluded.quantity,
+                            price_cny = excluded.price_cny,
+                            price_status = excluded.price_status,
+                            source_row_key = excluded.source_row_key,
+                            dataset_version_id = excluded.dataset_version_id,
+                            row_content_hash = excluded.row_content_hash,
+                            available_at = excluded.available_at
+                        """,
+                        [
+                            spec.account_id,
+                            spec.valuation_date,
+                            source["symbol"],
+                            source["quantity"],
+                            source["price_cny"],
+                            source["price_status"],
+                            source["source_row_key"],
+                            source.get("dataset_version_id"),
+                            source["row_content_hash"],
+                            source["available_at"],
+                        ],
+                    )
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
         return NavSnapshot(
             account_id=spec.account_id,
             valuation_date=spec.valuation_date,
