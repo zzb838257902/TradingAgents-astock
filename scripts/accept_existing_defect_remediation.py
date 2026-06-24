@@ -491,42 +491,62 @@ def _accept_env() -> dict[str, str]:
     return env
 
 
+def run_mootdx_probe_subprocess(
+    *,
+    timeout_sec: float,
+    command: list[str] | None = None,
+) -> dict[str, object]:
+    """Run a mootdx probe command in a killable child process."""
+    probe_command = command or [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--probe-mootdx",
+    ]
+    try:
+        completed = subprocess.run(
+            probe_command,
+            cwd=ROOT,
+            env=_accept_env(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "BLOCKED", "reason": f"timed out after {timeout_sec}s"}
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "probe failed").strip()
+        return {"status": "BLOCKED", "reason": message}
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {
+            "status": "BLOCKED",
+            "reason": f"invalid JSON: {completed.stdout!r}",
+        }
+    if not isinstance(payload, dict):
+        return {"status": "BLOCKED", "reason": f"non-object JSON: {payload!r}"}
+    return {"status": "OK", **payload}
+
+
+def _probe_result_to_assertion(result: dict[str, object]) -> dict[str, Any]:
+    if result.get("status") == "OK":
+        return {k: v for k, v in result.items() if k != "status"}
+    reason = str(result.get("reason", "probe blocked"))
+    if reason.startswith("network blocked:"):
+        raise AssertionError(reason)
+    raise AssertionError(f"network blocked: {reason}")
+
+
 def run_probe_subprocess(
     cmd: list[str],
     *,
     timeout_sec: float,
 ) -> dict[str, Any]:
     """Run a probe command in a child process with a hard timeout."""
-    try:
-        completed = subprocess.run(
-            cmd,
-            cwd=ROOT,
-            env=_accept_env(),
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise AssertionError(
-            f"network blocked: timed out after {timeout_sec}s",
-        ) from exc
-    if completed.returncode == 0:
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise AssertionError(
-                f"mootdx probe returned invalid JSON: {completed.stdout!r}",
-            ) from exc
-        if not isinstance(payload, dict):
-            raise AssertionError(f"mootdx probe returned non-object JSON: {payload!r}")
-        return payload
-    message = (completed.stderr or completed.stdout or "probe failed").strip()
-    if "returned empty frame" in message:
-        raise AssertionError(message)
-    if message.startswith("network blocked:"):
-        raise AssertionError(message)
-    raise AssertionError(f"network blocked: {message}")
+    return _probe_result_to_assertion(
+        run_mootdx_probe_subprocess(timeout_sec=timeout_sec, command=cmd),
+    )
 
 
 def probe_mootdx_connect_payload() -> dict[str, Any]:
@@ -554,10 +574,8 @@ def _main_probe_mootdx() -> int:
 
 
 def _run_mootdx_connect_subprocess(timeout_sec: float) -> dict[str, Any]:
-    script_path = str(Path(__file__).resolve())
-    return run_probe_subprocess(
-        [sys.executable, script_path, "--probe-mootdx"],
-        timeout_sec=timeout_sec,
+    return _probe_result_to_assertion(
+        run_mootdx_probe_subprocess(timeout_sec=timeout_sec),
     )
 
 

@@ -42,3 +42,9 @@ MOOTDX_SKIP_BESTIP=1 PYTHONPATH='.pip_packages:.' python3 -m pytest tests -q --c
 待提交：`fix(market-data): harden daily indicator empty-path guards`
 
 **请复审中期验收 A；通过后继续 Task 4。**
+
+---
+
+## Stage 6A Task 0 追加（2026-06-22）
+
+专项收尾门禁已在 `feature/stage6a-paper-operations` 关闭：`run_mootdx_probe_subprocess` + 硬超时测试；详见 [最终验收报告](2026-06-21-defect-remediation-final.md)。

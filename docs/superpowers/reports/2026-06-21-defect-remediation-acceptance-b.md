@@ -71,6 +71,12 @@ PYTHONPATH='.pip_packages:.' python3 -m tradingagents.screener.cli screen \
 
 **中期验收 B 已通过；继续 Task 6。**
 
+---
+
+## Stage 6A Task 0 追加（2026-06-22）
+
+专项收尾门禁已关闭（killable mootdx 子进程、`BLOCKED/2` 状态机、564 pytest）；详见 [最终验收报告](2026-06-21-defect-remediation-final.md)。
+
 ## 首轮阻塞项与修复（`2d36cef0`）
 
 | 级别 | 问题 | 修复 |

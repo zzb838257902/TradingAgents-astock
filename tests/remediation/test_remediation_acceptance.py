@@ -103,10 +103,20 @@ def test_compute_report_status_repository_failure_is_fail():
     assert exit_code == 1
 
 
-def test_run_probe_subprocess_timeout_is_hard():
-    import os
-    import time
+def test_mootdx_probe_timeout_returns_without_waiting_for_worker():
+    from scripts.accept_existing_defect_remediation import run_mootdx_probe_subprocess
 
+    started = time.perf_counter()
+    result = run_mootdx_probe_subprocess(
+        timeout_sec=0.1,
+        command=[sys.executable, "-c", "import time; time.sleep(5)"],
+    )
+    assert time.perf_counter() - started < 1.0
+    assert result["status"] == "BLOCKED"
+    assert "timed out" in str(result.get("reason", ""))
+
+
+def test_run_probe_subprocess_timeout_is_hard():
     from scripts.accept_existing_defect_remediation import run_probe_subprocess
 
     start = time.monotonic()
