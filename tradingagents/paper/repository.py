@@ -22,6 +22,7 @@ from tradingagents.paper.contracts import (
     OrderSide,
     OrderStatus,
     PaperAccount,
+    PaperFill,
     PaperOrder,
     PositionEntry,
     PositionSourceType,
@@ -2487,6 +2488,125 @@ class PaperRepository:
             [account_id, execution_date],
         ).fetchone()
         return row[0] if row is not None else None
+
+    def get_rebalance_revision(self, rebalance_run_id: str) -> RebalanceRevisionSpec | None:
+        row = self.connection.execute(
+            """
+            SELECT rebalance_run_id, account_id, screen_run_id, screen_content_hash,
+                   target_hash, signal_date, signal_time, execution_date,
+                   universe_hash, config_hash, strategy_version,
+                   target_weights_json, logical_run_key, revision, status
+            FROM rebalance_runs
+            WHERE rebalance_run_id = ?
+            """,
+            [rebalance_run_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return RebalanceRevisionSpec(
+            rebalance_run_id=row[0],
+            account_id=row[1],
+            screen_run_id=row[2],
+            screen_content_hash=row[3],
+            target_hash=row[4],
+            signal_date=row[5],
+            signal_time=row[6],
+            execution_date=row[7],
+            universe_hash=row[8],
+            config_hash=row[9],
+            strategy_version=row[10],
+            target_weights_json=row[11],
+            logical_run_key=row[12],
+            revision=int(row[13]),
+            status=RunStatus(row[14]),
+        )
+
+    def list_fills(
+        self,
+        account_id: str,
+        *,
+        rebalance_run_id: str | None = None,
+        execution_date: date | None = None,
+    ) -> list[PaperFill]:
+        query = """
+            SELECT fill.fill_id, fill.fill_sequence, fill.order_id, fill.account_id,
+                   fill.symbol, fill.execution_date, fill.execution_time, fill.quantity,
+                   fill.price_cny, fill.commission_cny, fill.stamp_tax_cny,
+                   fill.other_fee_cny, fill.source_snapshot_key, fill.source_snapshot_version_id
+            FROM paper_fills AS fill
+        """
+        params: list[Any] = []
+        clauses = ["fill.account_id = ?"]
+        params.append(account_id)
+        if rebalance_run_id is not None:
+            query += " JOIN paper_orders AS ord ON ord.order_id = fill.order_id"
+            clauses.append("ord.rebalance_run_id = ?")
+            params.append(rebalance_run_id)
+        if execution_date is not None:
+            clauses.append("fill.execution_date = ?")
+            params.append(execution_date)
+        query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY fill.execution_date, fill.execution_time, fill.fill_id"
+        rows = self.connection.execute(query, params).fetchall()
+        return [
+            PaperFill(
+                fill_id=row[0],
+                fill_sequence=int(row[1]),
+                order_id=row[2],
+                account_id=row[3],
+                symbol=row[4],
+                execution_date=row[5],
+                execution_time=row[6],
+                quantity=int(row[7]),
+                price_cny=_decimal(row[8]),
+                commission_cny=_decimal(row[9]),
+                stamp_tax_cny=_decimal(row[10]),
+                other_fee_cny=_decimal(row[11]),
+                source_snapshot_key=row[12],
+                source_snapshot_version_id=row[13],
+            )
+            for row in rows
+        ]
+
+    def get_nav_snapshot(self, account_id: str, valuation_date: date) -> NavSnapshot | None:
+        row = self.connection.execute(
+            """
+            SELECT account_id, valuation_date, cash_cny, positions_value_cny,
+                   total_equity_cny, daily_return, cumulative_return, drawdown,
+                   valuation_manifest_hash, created_at
+            FROM paper_nav_snapshots
+            WHERE account_id = ? AND valuation_date = ?
+            """,
+            [account_id, valuation_date],
+        ).fetchone()
+        if row is None:
+            return None
+        return NavSnapshot(
+            account_id=row[0],
+            valuation_date=row[1],
+            cash_cny=money(_decimal(row[2])),
+            positions_value_cny=money(_decimal(row[3])),
+            total_equity_cny=money(_decimal(row[4])),
+            daily_return=_decimal(row[5]) if row[5] is not None else None,
+            cumulative_return=_decimal(row[6]) if row[6] is not None else None,
+            drawdown=_decimal(row[7]) if row[7] is not None else None,
+            valuation_manifest_hash=row[8],
+            created_at=row[9],
+        )
+
+    def list_recent_run_ids(self, account_id: str, *, limit: int = 5) -> list[str]:
+        rows = self.connection.execute(
+            """
+            SELECT run_id, MAX(started_at) AS last_started
+            FROM paper_run_steps
+            WHERE run_id LIKE ?
+            GROUP BY run_id
+            ORDER BY last_started DESC
+            LIMIT ?
+            """,
+            [f"%:{account_id}:%", limit],
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def save_run_step(self, spec: RunStepWriteSpec) -> None:
         now = datetime.now(tz=SHANGHAI)

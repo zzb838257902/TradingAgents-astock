@@ -17,6 +17,7 @@ from tradingagents.paper.corporate_actions import CorporateActionProcessor
 from tradingagents.paper.exceptions import PaperError
 from tradingagents.paper.execution import PaperExecutionEngine
 from tradingagents.paper.planner import RebalancePlanner
+from tradingagents.paper.reporting import PaperReportWriter, build_report_run_from_rebalance
 from tradingagents.paper.repository import PaperRepository, RunStepWriteSpec
 from tradingagents.paper.screening import STRATEGY_VERSION
 from tradingagents.paper.valuation import MarkToMarketService, ValuationStatus
@@ -651,9 +652,45 @@ def _step_create_rebalance_plan(ctx: JobContext) -> StepExecutionResult:
 
 
 def _step_generate_reports(ctx: JobContext) -> StepExecutionResult:
+    plan_step = ctx.paper_repo.get_run_step(ctx.run_id, "create_rebalance_plan")
+    if plan_step is None or not plan_step.output_json:
+        return StepExecutionResult(
+            status=StepStatus.SUCCESS,
+            output={"skipped": True, "reason": "no rebalance plan"},
+        )
+    plan_output = json.loads(plan_step.output_json)
+    rebalance_run_id = plan_output.get("rebalance_run_id")
+    if not rebalance_run_id:
+        return StepExecutionResult(
+            status=StepStatus.SUCCESS,
+            output={"skipped": True, "reason": "no rebalance_run_id"},
+        )
+    step_statuses = {
+        step.step_name: step.status.value
+        for step in ctx.paper_repo.list_run_steps(ctx.run_id)
+    }
+    degradation_notes: list[str] = []
+    sync_step = ctx.paper_repo.get_run_step(ctx.run_id, "sync_market_data")
+    if sync_step and sync_step.output_json:
+        sync_output = json.loads(sync_step.output_json)
+        for key, value in (sync_output.get("sync_steps") or {}).items():
+            if "degraded" in key or value in {"error", "blocked"}:
+                degradation_notes.append(f"{key}={value}")
+    run = build_report_run_from_rebalance(
+        ctx.paper_repo,
+        rebalance_run_id,
+        run_status=ctx.after_close_report.get("status") if ctx.after_close_report else None,
+        step_statuses=step_statuses,
+        degradation_notes=degradation_notes,
+    )
+    writer = PaperReportWriter(ctx.paper_repo.paths.home_dir)
+    manifest_path = writer.write(run, paper_repo=ctx.paper_repo)
     return StepExecutionResult(
         status=StepStatus.SUCCESS,
-        output={"report_status": "deferred_to_task7"},
+        output={
+            "manifest_path": str(manifest_path),
+            "revision": run.revision,
+        },
     )
 
 

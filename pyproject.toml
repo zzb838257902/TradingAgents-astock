@@ -69,6 +69,7 @@ tradingagents-web = "web.launch:main"
 tradingagents-screen = "tradingagents.screener.cli:app"
 tradingagents-market-data = "tradingagents.market_data.cli:app"
 tradingagents-scheduler = "tradingagents.scheduler.cli:app"
+tradingagents-paper = "tradingagents.paper.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*", "web*"]
