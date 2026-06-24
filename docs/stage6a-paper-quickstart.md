@@ -57,6 +57,8 @@ PYTHONPATH='.pip_packages:.' python3 scripts/accept_stage6a_paper.py --live-smok
 PYTHONPATH='.pip_packages:.' python3 scripts/summarize_stage6a_observation.py ~/.tradingagents/observations
 ```
 
+Tier C 每日操作清单见 `docs/stage6a-tier-c-checklist.md`。
+
 ## Five-day replay fixture
 
 Deterministic offline evidence lives in `tests/fixtures/paper/five_day_market.json`. Pytest covers replay and crash recovery:
