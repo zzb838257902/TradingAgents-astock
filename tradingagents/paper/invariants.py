@@ -162,7 +162,7 @@ def assert_account_invariants(
 
     nav_row = connection.execute(
         """
-        SELECT cash_cny, positions_value_cny, total_equity_cny
+        SELECT valuation_date, cash_cny, positions_value_cny, total_equity_cny
         FROM paper_nav_snapshots
         WHERE account_id = ?
         ORDER BY valuation_date DESC
@@ -171,7 +171,7 @@ def assert_account_invariants(
         [account_id],
     ).fetchone()
     if nav_row is not None:
-        nav_cash, positions_value, total_equity = nav_row
+        nav_date, nav_cash, positions_value, total_equity = nav_row
         nav_cash = money(_decimal(nav_cash))
         positions_value = money(_decimal(positions_value))
         total_equity = money(_decimal(total_equity))
@@ -179,7 +179,8 @@ def assert_account_invariants(
             raise InvariantViolation(
                 f"NAV invariant failed: {total_equity} != {nav_cash} + {positions_value}"
             )
-        if nav_cash != total_cash:
-            raise InvariantViolation(
-                f"NAV cash {nav_cash} != ledger cash {total_cash} for {account_id}"
-            )
+        if as_of_date is None or nav_date >= as_of_date:
+            if nav_cash != total_cash:
+                raise InvariantViolation(
+                    f"NAV cash {nav_cash} != ledger cash {total_cash} for {account_id}"
+                )

@@ -105,8 +105,8 @@ def stable_rebalance_run_id(logical_run_key: str, revision: int) -> str:
     return f"reb-{digest[:12]}"
 
 
-def stable_order_id(*, side: OrderSide, symbol: str) -> str:
-    return f"ord-{side.name.lower()}-{symbol}"
+def stable_order_id(*, side: OrderSide, symbol: str, rebalance_run_id: str) -> str:
+    return f"ord-{side.name.lower()}-{symbol}-{rebalance_run_id}"
 
 
 def next_execution_date(market_repo: MarketDataRepository, signal_date: date) -> date:
@@ -233,7 +233,9 @@ def plan_orders(
                 continue
             orders.append(
                 PaperOrder(
-                    order_id=stable_order_id(side=OrderSide.SELL, symbol=symbol),
+                    order_id=stable_order_id(
+                        side=OrderSide.SELL, symbol=symbol, rebalance_run_id=rebalance_run_id
+                    ),
                     rebalance_run_id=rebalance_run_id,
                     account_id=account_id,
                     symbol=symbol,
@@ -276,7 +278,9 @@ def plan_orders(
         projected_cash -= notional + commission
         orders.append(
             PaperOrder(
-                order_id=stable_order_id(side=OrderSide.BUY, symbol=symbol),
+                order_id=stable_order_id(
+                    side=OrderSide.BUY, symbol=symbol, rebalance_run_id=rebalance_run_id
+                ),
                 rebalance_run_id=rebalance_run_id,
                 account_id=account_id,
                 symbol=symbol,

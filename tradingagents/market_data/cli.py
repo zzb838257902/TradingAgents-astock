@@ -10,9 +10,11 @@ from typing import Optional
 import typer
 
 from tradingagents.market_data.config import MarketDataPaths
+from tradingagents.market_data.fixture_store import load_fixture_into_repository
 from tradingagents.market_data.providers.factory import create_resolved_provider
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync
+from tradingagents.scheduler.jobs import load_fixture_file
 from tradingagents.market_data.market_hours import market_open_observed_at
 from tradingagents.market_data.sync_policy import shanghai_today
 
@@ -23,10 +25,26 @@ def _paths(home_dir: Path) -> MarketDataPaths:
     return MarketDataPaths(home_dir=home_dir.expanduser())
 
 
-def _sync(home_dir: Path, provider: str | None = None) -> MarketDataSync:
+def _sync(
+    home_dir: Path,
+    provider: str | None = None,
+    fixture: Path | None = None,
+) -> MarketDataSync:
     paths = _paths(home_dir)
     repo = MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-    resolved = create_resolved_provider(cli_provider=provider, home_dir=home_dir)
+    fixture_data = load_fixture_file(fixture) if fixture else None
+    if fixture_data is not None:
+        load_fixture_into_repository(repo, fixture_data)
+    resolved_provider = (
+        "fixture"
+        if fixture_data is not None and provider is None
+        else provider
+    )
+    resolved = create_resolved_provider(
+        cli_provider=resolved_provider,
+        home_dir=home_dir,
+        fixture=fixture_data,
+    )
     return MarketDataSync(repo, resolved, paths)
 
 
@@ -34,11 +52,12 @@ def _sync(home_dir: Path, provider: str | None = None) -> MarketDataSync:
 def init_market_data(
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
     provider: Optional[str] = typer.Option(None, "--provider"),
+    fixture: Optional[Path] = typer.Option(None, "--fixture"),
 ) -> None:
     """Initialize live market database schema and run capability probe."""
     paths = _paths(home_dir)
     MarketDataRepository(paths.live_db_path, snapshot_dir=paths.snapshot_dir)
-    result = _sync(home_dir, provider).probe_capabilities()
+    result = _sync(home_dir, provider, fixture).probe_capabilities()
     typer.echo(json.dumps({
         "live_db": str(paths.live_db_path),
         "provider": provider or "resolved-default",
@@ -51,9 +70,10 @@ def init_market_data(
 def probe_capabilities(
     home_dir: Path = typer.Option(Path("~/.tradingagents"), "--home-dir"),
     provider: Optional[str] = typer.Option(None, "--provider"),
+    fixture: Optional[Path] = typer.Option(None, "--fixture"),
 ) -> None:
     """Run provider capability probe and persist results."""
-    result = _sync(home_dir, provider).probe_capabilities()
+    result = _sync(home_dir, provider, fixture).probe_capabilities()
     typer.echo(json.dumps({
         "status": result.status.value,
         "errors": result.errors,

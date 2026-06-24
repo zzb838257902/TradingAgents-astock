@@ -179,7 +179,11 @@ def test_all_cash_requires_explicit_mode(planner_setup):
     )
     assert plan.orders
     assert all(order.side == OrderSide.SELL for order in plan.orders)
-    assert plan.orders[0].order_id == stable_order_id(side=OrderSide.SELL, symbol="600001")
+    assert plan.orders[0].order_id == stable_order_id(
+        side=OrderSide.SELL,
+        symbol="600001",
+        rebalance_run_id=plan.rebalance_run_id,
+    )
 
 
 def test_same_input_reuses_active_revision(planner_setup):
