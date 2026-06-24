@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -325,11 +325,13 @@ def run_five_day_replay(
     )
     try:
         _load_market_fixture(market_repo, scenario)
+        trade_days = [_parse_date(day) for day in scenario["trade_days"]]
+        opened_at = datetime.combine(trade_days[0], time(9, 0), tzinfo=SHANGHAI)
         paper_repo.create_account(
             scenario["account_id"],
             Decimal(str(scenario["initial_cash_cny"])),
+            opened_at=opened_at,
         )
-        trade_days = [_parse_date(day) for day in scenario["trade_days"]]
         for index, trade_day in enumerate(trade_days):
             if index > 0:
                 crash_steps = (

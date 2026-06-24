@@ -16,18 +16,18 @@ from tradingagents.paper.exceptions import LeaseConflict, LeaseTimeout, StaleFen
 from tradingagents.paper.locking import _lock_path
 from tradingagents.paper.migrations import SHANGHAI
 from tradingagents.paper.repository import PaperRepository
-from tests.paper.conftest import EXECUTION_BATCH, make_execution_batch, seed_execution_orders
+from tests.paper.conftest import ACCOUNT_OPENED_AT, EXECUTION_BATCH, make_execution_batch, seed_execution_orders
 
 
 def test_acquire_account_lease_increments_fencing_token(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     first = repo.acquire_account_lease("demo", owner_id="one")
     second = repo.acquire_account_lease("demo", owner_id="one", lease_seconds=300)
     assert second.token == first.token + 1
 
 
 def test_concurrent_lease_acquisition_serializes(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     results: list[int] = []
     errors: list[Exception] = []
 
@@ -61,14 +61,14 @@ def test_concurrent_lease_acquisition_serializes(repo):
 
 
 def test_valid_lease_blocks_other_owner(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     repo.acquire_account_lease("demo", owner_id="one", lease_seconds=300)
     with pytest.raises(LeaseConflict):
         repo.acquire_account_lease("demo", owner_id="two", lease_seconds=300)
 
 
 def test_expired_lease_can_be_taken_over(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     first = repo.acquire_account_lease("demo", owner_id="one", lease_seconds=300)
     repo.expire_lease_for_test("demo")
     second = repo.take_over_expired_lease("demo", owner_id="two", lease_seconds=300)
@@ -77,7 +77,7 @@ def test_expired_lease_can_be_taken_over(repo):
 
 
 def test_first_takeover_on_new_account_succeeds(repo):
-    repo.create_account("acct", Decimal("100000.00"))
+    repo.create_account("acct", Decimal("100000.00"), opened_at=ACCOUNT_OPENED_AT)
     lease = repo.take_over_expired_lease("acct", owner_id="owner-1")
     assert lease.token == 1
     assert lease.owner_id == "owner-1"
@@ -207,7 +207,7 @@ def test_stale_token_rejected_on_money_impact(repo):
 
 
 def test_lock_timeout_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     held = threading.Event()
     release = threading.Event()
     lock_file = _lock_path(repo.paths.home_dir, "demo")

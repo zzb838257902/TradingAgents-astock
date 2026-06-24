@@ -354,8 +354,9 @@ class PaperRepository:
         initial_cash_cny: Decimal | str | int,
         *,
         name: str | None = None,
+        opened_at: datetime | None = None,
     ) -> PaperAccount:
-        now = datetime.now(tz=SHANGHAI)
+        now = opened_at or datetime.now(tz=SHANGHAI)
         initial = money(initial_cash_cny)
         display_name = name or account_id
         self.connection.execute("BEGIN")
@@ -1766,58 +1767,90 @@ class PaperRepository:
             ],
         )
 
-    def _compute_account_projection(self, account_id: str, as_of_date: date) -> AccountProjection:
+    def _sum_cash_as_of(self, account_id: str, as_of_date: date) -> Decimal:
         cash_row = self.connection.execute(
             """
             SELECT COALESCE(SUM(amount_cny), 0)
             FROM paper_cash_ledger
-            WHERE account_id = ?
+            WHERE account_id = ? AND CAST(occurred_at AS DATE) <= ?
             """,
-            [account_id],
+            [account_id, as_of_date],
         ).fetchone()
-        cash_cny = money(_decimal(cash_row[0]))
-        symbols = self.connection.execute(
+        return money(_decimal(cash_row[0]))
+
+    def _position_symbols_as_of(self, account_id: str, as_of_date: date) -> list[str]:
+        rows = self.connection.execute(
             """
             SELECT DISTINCT symbol
             FROM paper_position_ledger
-            WHERE account_id = ?
+            WHERE account_id = ? AND effective_date <= ?
             """,
-            [account_id],
+            [account_id, as_of_date],
         ).fetchall()
+        return sorted({row[0] for row in rows})
+
+    def _position_quantity_as_of(
+        self,
+        account_id: str,
+        symbol: str,
+        as_of_date: date,
+    ) -> int:
+        qty_row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(quantity_delta), 0)
+            FROM paper_position_ledger
+            WHERE account_id = ? AND symbol = ? AND effective_date <= ?
+            """,
+            [account_id, symbol, as_of_date],
+        ).fetchone()
+        return int(qty_row[0])
+
+    def _lot_totals_as_of(
+        self,
+        account_id: str,
+        symbol: str,
+        as_of_date: date,
+    ) -> tuple[int, Decimal]:
+        lot_row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(remaining_quantity), 0),
+                   COALESCE(SUM(remaining_cost_cny), 0)
+            FROM paper_lots
+            WHERE account_id = ? AND symbol = ?
+              AND acquired_date <= ?
+              AND (closed_at IS NULL OR CAST(closed_at AS DATE) > ?)
+            """,
+            [account_id, symbol, as_of_date, as_of_date],
+        ).fetchone()
+        return int(lot_row[0]), money(_decimal(lot_row[1]))
+
+    def _available_quantity_as_of(
+        self,
+        account_id: str,
+        symbol: str,
+        as_of_date: date,
+    ) -> int:
+        available_row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(remaining_quantity), 0)
+            FROM paper_lots
+            WHERE account_id = ? AND symbol = ?
+              AND acquired_date < ?
+              AND (closed_at IS NULL OR CAST(closed_at AS DATE) > ?)
+            """,
+            [account_id, symbol, as_of_date, as_of_date],
+        ).fetchone()
+        return int(available_row[0])
+
+    def _compute_account_projection(self, account_id: str, as_of_date: date) -> AccountProjection:
+        cash_cny = self._sum_cash_as_of(account_id, as_of_date)
         positions: dict[str, PositionProjection] = {}
-        for (symbol,) in sorted(symbols, key=lambda row: row[0]):
-            qty_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(quantity_delta), 0)
-                FROM paper_position_ledger
-                WHERE account_id = ? AND symbol = ?
-                """,
-                [account_id, symbol],
-            ).fetchone()
-            quantity = int(qty_row[0])
+        for symbol in self._position_symbols_as_of(account_id, as_of_date):
+            quantity = self._position_quantity_as_of(account_id, symbol, as_of_date)
             if quantity == 0:
                 continue
-            lot_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(remaining_quantity), 0),
-                       COALESCE(SUM(remaining_cost_cny), 0)
-                FROM paper_lots
-                WHERE account_id = ? AND symbol = ? AND closed_at IS NULL
-                """,
-                [account_id, symbol],
-            ).fetchone()
-            lot_qty = int(lot_row[0])
-            lot_cost = money(_decimal(lot_row[1]))
-            available_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(remaining_quantity), 0)
-                FROM paper_lots
-                WHERE account_id = ? AND symbol = ?
-                  AND closed_at IS NULL AND acquired_date < ?
-                """,
-                [account_id, symbol, as_of_date],
-            ).fetchone()
-            available_quantity = int(available_row[0])
+            lot_qty, lot_cost = self._lot_totals_as_of(account_id, symbol, as_of_date)
+            available_quantity = self._available_quantity_as_of(account_id, symbol, as_of_date)
             average_cost = money(lot_cost / Decimal(quantity)) if quantity > 0 else money(0)
             if lot_qty != quantity and lot_qty > 0:
                 average_cost = money(lot_cost / Decimal(lot_qty))
@@ -1835,15 +1868,7 @@ class PaperRepository:
 
     def _rebuild_positions_projection(self, account_id: str, as_of_date: date) -> None:
         now = datetime.now(tz=SHANGHAI)
-        symbols = self.connection.execute(
-            """
-            SELECT DISTINCT symbol
-            FROM paper_position_ledger
-            WHERE account_id = ?
-            """,
-            [account_id],
-        ).fetchall()
-        symbol_set = {row[0] for row in symbols}
+        symbol_set = set(self._position_symbols_as_of(account_id, as_of_date))
         existing = self.connection.execute(
             "SELECT symbol FROM paper_positions WHERE account_id = ?",
             [account_id],
@@ -1851,36 +1876,9 @@ class PaperRepository:
         symbol_set.update(row[0] for row in existing)
 
         for symbol in sorted(symbol_set):
-            qty_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(quantity_delta), 0)
-                FROM paper_position_ledger
-                WHERE account_id = ? AND symbol = ?
-                """,
-                [account_id, symbol],
-            ).fetchone()
-            quantity = int(qty_row[0])
-            lot_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(remaining_quantity), 0),
-                       COALESCE(SUM(remaining_cost_cny), 0)
-                FROM paper_lots
-                WHERE account_id = ? AND symbol = ? AND closed_at IS NULL
-                """,
-                [account_id, symbol],
-            ).fetchone()
-            lot_qty = int(lot_row[0])
-            lot_cost = money(_decimal(lot_row[1]))
-            available_row = self.connection.execute(
-                """
-                SELECT COALESCE(SUM(remaining_quantity), 0)
-                FROM paper_lots
-                WHERE account_id = ? AND symbol = ?
-                  AND closed_at IS NULL AND acquired_date < ?
-                """,
-                [account_id, symbol, as_of_date],
-            ).fetchone()
-            available_quantity = int(available_row[0])
+            quantity = self._position_quantity_as_of(account_id, symbol, as_of_date)
+            lot_qty, lot_cost = self._lot_totals_as_of(account_id, symbol, as_of_date)
+            available_quantity = self._available_quantity_as_of(account_id, symbol, as_of_date)
             average_cost = money(lot_cost / Decimal(quantity)) if quantity > 0 else money(0)
             if quantity == 0:
                 self.connection.execute(

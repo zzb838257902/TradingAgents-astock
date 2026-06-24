@@ -376,6 +376,10 @@ class RebalancePlanner:
                         "screen content changed; use force_revision to create a new revision"
                     )
             elif active.target_hash == target_hash:
+                if self.paper_repo.rebalance_has_fills(active.rebalance_run_id):
+                    raise RevisionConflict(
+                        f"rebalance revision {active.rebalance_run_id} already has fills"
+                    )
                 return RebalancePlan(
                     rebalance_run_id=active.rebalance_run_id,
                     account_id=account_id,

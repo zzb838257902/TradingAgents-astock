@@ -13,6 +13,8 @@ from tradingagents.paper.contracts import (
     OrderSide,
     OrderStatus,
     PaperOrder,
+    PositionEntry,
+    PositionSourceType,
     RunStatus,
     TargetPortfolioMode,
 )
@@ -20,6 +22,7 @@ from tradingagents.paper.exceptions import IdempotencyConflict, StaleFencingToke
 from tradingagents.paper.invariants import assert_account_invariants
 from tradingagents.paper.repository import ExecutionBatch, RebalanceRevisionSpec, ValuationWriteSpec
 from tests.paper.conftest import (
+    ACCOUNT_OPENED_AT,
     EXECUTION_BATCH,
     EXECUTION_TIME,
     SIGNAL_TIME,
@@ -56,8 +59,8 @@ def test_paper_paths_use_separate_paper_db(tmp_path):
 
 
 def test_create_account_appends_initial_cash_idempotently(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     snapshot = repo.load_account_snapshot("demo")
     assert snapshot.cash_cny == Decimal("1000000.00")
     rows = repo.connection.execute(
@@ -67,8 +70,30 @@ def test_create_account_appends_initial_cash_idempotently(repo):
     assert int(rows[0]) == 1
 
 
+def test_load_account_snapshot_excludes_future_positions(repo):
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
+    append_position_with_lease(
+        repo,
+        PositionEntry(
+            position_entry_id="pos-future",
+            account_id="demo",
+            symbol="600000",
+            quantity_delta=1000,
+            cost_delta_cny=Decimal("10000.00"),
+            effective_date=date(2026, 6, 30),
+            source_type=PositionSourceType.ADJUSTMENT,
+            source_id="seed",
+            component="QUANTITY",
+            business_key="demo:ADJUSTMENT:seed-future:QUANTITY",
+        ),
+    )
+    snapshot = repo.load_account_snapshot("demo", as_of_date=date(2026, 6, 24))
+    assert snapshot.cash_cny == Decimal("1000000.00")
+    assert "600000" not in snapshot.positions
+
+
 def test_cash_and_position_projection_rebuild_from_ledgers(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_position_with_lease(repo, position_entry())
     rebuilt = rebuild_projection_with_lease(repo, "demo")
     assert rebuilt.cash_cny == Decimal("1000000.00")
@@ -76,25 +101,25 @@ def test_cash_and_position_projection_rebuild_from_ledgers(repo):
 
 
 def test_append_cash_without_fencing_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     with pytest.raises(TypeError):
         repo.append_cash_entry(cash_entry(entry_id="cash-x", component="BONUS", source_id="x"))
 
 
 def test_append_position_without_fencing_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     with pytest.raises(TypeError):
         repo.append_position_entry(position_entry(entry_id="pos-x"))
 
 
 def test_rebuild_projection_without_fencing_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     with pytest.raises(TypeError):
         repo.rebuild_account_projection("demo", as_of_date=TRADE_DATE)
 
 
 def test_public_in_transaction_bypass_removed(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     with pytest.raises(TypeError):
         repo.append_cash_entry(
             cash_entry(entry_id="cash-x", component="BONUS", source_id="x"),
@@ -109,7 +134,7 @@ def test_public_in_transaction_bypass_removed(repo):
 
 
 def test_duplicate_business_key_same_payload_is_idempotent(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     entry = cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00"))
     first = append_cash_with_lease(repo, entry)
     second = append_cash_with_lease(
@@ -128,7 +153,7 @@ def test_duplicate_business_key_same_payload_is_idempotent(repo):
 
 
 def test_duplicate_business_key_different_payload_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_cash_with_lease(
         repo,
         cash_entry(entry_id="cash-a", component="BONUS", source_id="promo-1", amount_cny=Decimal("100.00")),
@@ -251,7 +276,7 @@ def test_fault_injection_before_projection_rolls_back(repo):
 
 
 def test_write_valuation_persists_nav(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     lease = acquire_test_lease(repo)
     nav = repo.write_valuation(
         ValuationWriteSpec(
@@ -269,7 +294,7 @@ def test_write_valuation_persists_nav(repo):
 
 
 def test_apply_corporate_action_stub(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     from tradingagents.paper.contracts import CorporateActionApplicationStatus
     from tradingagents.paper.repository import CorporateActionApplicationSpec
 
@@ -320,7 +345,7 @@ def test_insert_orders_conflict_raises(repo):
 
 
 def test_create_rebalance_without_fencing_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     spec = RebalanceRevisionSpec(
         rebalance_run_id="reb-x",
         account_id="demo",
@@ -424,7 +449,7 @@ def test_order_idempotent_after_rejection_metadata(repo):
 
 
 def test_cash_entry_different_occurred_at_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_cash_with_lease(
         repo,
         cash_entry(
@@ -478,7 +503,7 @@ def test_duplicate_fill_key_different_payload_raises(repo):
 
 
 def test_load_account_snapshot_does_not_mutate_projection(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_position_with_lease(repo, position_entry())
     before = repo.connection.execute(
         "SELECT COUNT(*) FROM paper_positions WHERE account_id = ?",

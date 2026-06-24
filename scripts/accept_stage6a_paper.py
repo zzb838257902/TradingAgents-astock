@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,85 +44,9 @@ def _run_cmd(cmd: list[str], *, timeout: int = 120) -> dict:
 
 
 def run_live_smoke(home_dir: Path) -> dict:
-    home = str(home_dir.expanduser())
-    fixture = str(ROOT / "tests/fixtures/market_data/provider_mini.json")
-    steps = [
-        {
-            "name": "market_data_init",
-            "result": _run_cmd([
-                sys.executable,
-                "-m",
-                "tradingagents.market_data.cli",
-                "init",
-                "--home-dir",
-                home,
-                "--provider",
-                "fixture",
-                "--fixture",
-                fixture,
-            ]),
-        },
-        {
-            "name": "paper_init",
-            "result": _run_cmd([
-                sys.executable,
-                "-m",
-                "tradingagents.paper.cli",
-                "init",
-                "--account-id",
-                "demo",
-                "--home-dir",
-                home,
-            ]),
-        },
-        {
-            "name": "paper_status_readonly",
-            "result": _run_cmd([
-                sys.executable,
-                "-m",
-                "tradingagents.paper.cli",
-                "status",
-                "--account-id",
-                "demo",
-                "--home-dir",
-                home,
-            ]),
-        },
-        {
-            "name": "scheduler_run_open_blocked_or_success",
-            "result": _run_cmd([
-                sys.executable,
-                "-m",
-                "tradingagents.scheduler.cli",
-                "run-open",
-                "--trade-date",
-                "2026-01-02",
-                "--account-id",
-                "demo",
-                "--home-dir",
-                home,
-                "--fixture",
-                fixture,
-            ]),
-        },
-    ]
-    normalized = []
-    passed = True
-    for step in steps:
-        result = step["result"]
-        exit_code = result["exit_code"]
-        ok = exit_code in {0, 2}
-        if exit_code == 1:
-            passed = False
-        normalized.append(
-            {
-                "name": step["name"],
-                "ok": ok,
-                "exit_code": exit_code,
-                "blocked": exit_code == 2,
-            }
-        )
-    return {"tier": "B", "passed": passed, "steps": normalized}
+    from tradingagents.paper.acceptance import run_live_smoke_acceptance
+
+    return run_live_smoke_acceptance(home_dir, run_cmd=_run_cmd)
 
 
 def main() -> int:

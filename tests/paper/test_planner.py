@@ -33,7 +33,7 @@ from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.report import RunReport, ScreeningStatus
 from tradingagents.screener.universe_resolver import UniverseRequest, UniverseType
 from tradingagents.market_data.market_hours import post_close_signal_time
-from tests.paper.conftest import append_position_with_lease
+from tests.paper.conftest import ACCOUNT_OPENED_AT, append_position_with_lease
 
 FIXTURE = Path("tests/fixtures/market_data/provider_mini.json")
 SIGNAL_DATE = date(2026, 1, 2)
@@ -50,7 +50,7 @@ def planner_setup(tmp_path):
     )
     load_fixture_into_repository(market_repo, fixture)
     paper_repo = PaperRepository(PaperPaths(home_dir=tmp_path / "paper"))
-    paper_repo.create_account("demo", Decimal("1000000.00"))
+    paper_repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     config = ScreenerConfig(home_dir=tmp_path).model_copy(
         update={
             "universe": ScreenerConfig().universe.model_copy(

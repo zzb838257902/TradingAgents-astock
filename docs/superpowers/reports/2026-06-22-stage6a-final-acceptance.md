@@ -1,6 +1,6 @@
 # Stage 6A Final Acceptance Report
 
-Date: 2026-06-22  
+Date: 2026-06-22
 Scope: Paper portfolio operations (Tasks 0–8)
 
 ## Tier A — Offline
@@ -30,12 +30,14 @@ Run:
 PYTHONPATH='.pip_packages:.' python3 scripts/accept_stage6a_paper.py --live-smoke
 ```
 
-Independent subprocess steps with timeouts:
+Independent subprocess steps with timeouts (free provider, not fixture):
 
-- Market data init
-- Paper account init
-- Read-only status
-- Scheduler open job (fixture-backed; may return blocked `2` without network)
+- Free opening snapshot sync
+- Repository screen (`run-after-close`)
+- Plan
+- Execution
+- Valuation
+- Report
 
 Local ledger/invariant failures return `1`. External network blockage returns `2`.
 

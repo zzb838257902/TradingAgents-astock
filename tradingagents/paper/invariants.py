@@ -180,7 +180,19 @@ def assert_account_invariants(
                 f"NAV invariant failed: {total_equity} != {nav_cash} + {positions_value}"
             )
         if as_of_date is None or nav_date >= as_of_date:
-            if nav_cash != total_cash:
+            cash_at_nav = money(
+                _decimal(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(SUM(amount_cny), 0)
+                        FROM paper_cash_ledger
+                        WHERE account_id = ? AND CAST(occurred_at AS DATE) <= ?
+                        """,
+                        [account_id, nav_date],
+                    ).fetchone()[0]
+                )
+            )
+            if nav_cash != cash_at_nav:
                 raise InvariantViolation(
-                    f"NAV cash {nav_cash} != ledger cash {total_cash} for {account_id}"
+                    f"NAV cash {nav_cash} != ledger cash {cash_at_nav} for {account_id}"
                 )

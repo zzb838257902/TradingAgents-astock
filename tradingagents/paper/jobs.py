@@ -27,6 +27,19 @@ from tradingagents.screener.universe_resolver import UniverseRequest
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
+_NETWORK_BLOCKED_MARKERS = (
+    "unable to connect",
+    "network blocked",
+    "timed out",
+    "connection refused",
+    "expecting value",
+)
+
+
+def _network_blocked_messages(errors: list[str]) -> bool:
+    joined = " ".join(errors).lower()
+    return any(marker in joined for marker in _NETWORK_BLOCKED_MARKERS)
+
 OPEN_JOB_STEPS = [
     "calendar_gate",
     "apply_effective_corporate_actions",
@@ -531,6 +544,15 @@ def _step_quality_gate(ctx: JobContext) -> StepExecutionResult:
         )
     errors = ctx.after_close_report.get("errors") or []
     if errors and ctx.after_close_report.get("status") == "error":
+        if _network_blocked_messages(errors):
+            return StepExecutionResult(
+                status=StepStatus.BLOCKED,
+                error=_stable_error(
+                    "QUALITY_GATE_BLOCKED",
+                    detail="; ".join(errors),
+                    retryable=True,
+                ),
+            )
         return StepExecutionResult(
             status=StepStatus.DATA_ERROR,
             error=_stable_error("SCREENING_DATA_ERROR", detail="; ".join(errors)),
@@ -718,12 +740,12 @@ AFTER_CLOSE_STEP_HANDLERS: dict[str, StepHandler] = {
 
 def _aggregate_run_status(step_results: dict[str, StepStatus], execute_output: dict | None) -> RunStatus:
     statuses = list(step_results.values())
+    if any(status == StepStatus.BLOCKED for status in statuses):
+        return RunStatus.BLOCKED
     if any(status == StepStatus.DATA_ERROR for status in statuses):
         return RunStatus.DATA_ERROR
     if any(status == StepStatus.FAILED for status in statuses):
         return RunStatus.FAILED
-    if any(status == StepStatus.BLOCKED for status in statuses):
-        return RunStatus.BLOCKED
     rejected = int((execute_output or {}).get("rejected_count") or 0)
     if rejected > 0:
         return RunStatus.COMPLETED_WITH_REJECTIONS

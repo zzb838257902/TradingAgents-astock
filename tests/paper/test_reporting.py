@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from decimal import Decimal
 
 from tradingagents.paper.execution import PaperExecutionEngine
@@ -58,6 +59,17 @@ def test_revision_reports_never_overwrite(tmp_path, repo: PaperRepository) -> No
     assert latest["revision"] == 2
     assert (second.parent / "daily_summary.md").exists()
     assert (first.parent / "run_manifest.json").exists()
+
+
+def test_latest_not_downgraded_when_regenerating_old_revision(tmp_path, repo: PaperRepository) -> None:
+    seed_execution_orders(repo)
+    reporter = PaperReportWriter(tmp_path)
+    first = reporter.write(_report_run(revision=1), paper_repo=repo)
+    second = reporter.write(_report_run(revision=2), paper_repo=repo)
+    shutil.rmtree(first.parent)
+    reporter.write(_report_run(revision=1), paper_repo=repo)
+    latest = json.loads((second.parents[1] / "latest.json").read_text(encoding="utf-8"))
+    assert latest["revision"] == 2
 
 
 def test_run_manifest_contains_required_fields(tmp_path, repo: PaperRepository) -> None:

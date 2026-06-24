@@ -29,6 +29,7 @@ from tradingagents.paper.repository import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+ACCOUNT_OPENED_AT = datetime(2020, 1, 1, 9, 0, tzinfo=SHANGHAI)
 SIGNAL_TIME = datetime(2026, 6, 22, 16, 0, tzinfo=SHANGHAI)
 TRADE_DATE = date(2026, 6, 23)
 EXECUTION_TIME = datetime(2026, 6, 23, 9, 35, tzinfo=SHANGHAI)
@@ -243,8 +244,13 @@ def seed_demo_account(
     *,
     account_id: str = "demo",
     initial_cash: Decimal = Decimal("1000000.00"),
+    opened_at: datetime | None = None,
 ) -> None:
-    repo.create_account(account_id, initial_cash)
+    repo.create_account(
+        account_id,
+        initial_cash,
+        opened_at=opened_at or ACCOUNT_OPENED_AT,
+    )
 
 
 def seed_execution_orders(
@@ -337,6 +343,7 @@ def position_entry(
     quantity_delta: int = 1000,
     cost_delta_cny: Decimal = Decimal("10000.00"),
     entry_id: str = "pos-test-1",
+    effective_date: date | None = None,
 ) -> PositionEntry:
     return PositionEntry(
         position_entry_id=entry_id,
@@ -344,7 +351,7 @@ def position_entry(
         symbol=symbol,
         quantity_delta=quantity_delta,
         cost_delta_cny=cost_delta_cny,
-        effective_date=TRADE_DATE,
+        effective_date=effective_date or TRADE_DATE,
         source_type=PositionSourceType.ADJUSTMENT,
         source_id="seed",
         component="QUANTITY",

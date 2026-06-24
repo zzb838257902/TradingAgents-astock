@@ -390,6 +390,19 @@ class PaperReportWriter:
             / "latest.json"
         )
 
+    def _current_latest_revision(self, run: PaperReportRun) -> int | None:
+        latest_path = self.latest_pointer_path(run)
+        if not latest_path.exists():
+            return None
+        payload = json.loads(latest_path.read_text(encoding="utf-8"))
+        return int(payload["revision"])
+
+    def _should_advance_latest(self, run: PaperReportRun) -> bool:
+        current = self._current_latest_revision(run)
+        if current is None:
+            return True
+        return run.revision >= current
+
     def write(self, run: PaperReportRun, *, paper_repo: PaperRepository) -> Path:
         orders: list[PaperOrder] = []
         fills: list[PaperFill] = []
@@ -450,15 +463,16 @@ class PaperReportWriter:
 
         os.replace(tmp_dir, revision_dir)
 
-        latest_payload = json.dumps(
-            {
-                "revision": run.revision,
-                "relative_path": f"rev-{run.revision}/run_manifest.json",
-                "manifest_hash": manifest["manifest_hash"],
-            },
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        _atomic_write_text(self.latest_pointer_path(run), latest_payload)
+        if self._should_advance_latest(run):
+            latest_payload = json.dumps(
+                {
+                    "revision": run.revision,
+                    "relative_path": f"rev-{run.revision}/run_manifest.json",
+                    "manifest_hash": manifest["manifest_hash"],
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            _atomic_write_text(self.latest_pointer_path(run), latest_payload)
         return revision_dir / "run_manifest.json"

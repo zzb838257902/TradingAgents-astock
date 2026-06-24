@@ -9,6 +9,7 @@ import pytest
 
 from tradingagents.paper.invariants import InvariantViolation, assert_account_invariants
 from tests.paper.conftest import (
+    ACCOUNT_OPENED_AT,
     TRADE_DATE,
     append_position_with_lease,
     position_entry,
@@ -18,12 +19,12 @@ from tests.paper.conftest import (
 
 
 def test_assert_account_invariants_passes_for_seeded_account(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     assert_account_invariants(repo.connection, "demo")
 
 
 def test_assert_account_invariants_passes_after_projection_seed(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_position_with_lease(repo, position_entry())
     rebuild_projection_with_lease(repo, "demo")
     assert_account_invariants(repo.connection, "demo", as_of_date=TRADE_DATE)
@@ -39,7 +40,7 @@ def test_assert_account_invariants_passes_after_execution(repo):
 
 
 def test_negative_cash_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     repo.connection.execute(
         """
         INSERT INTO paper_cash_ledger (
@@ -54,7 +55,7 @@ def test_negative_cash_raises(repo):
 
 
 def test_lot_ledger_mismatch_raises(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     append_position_with_lease(repo, position_entry())
     repo.connection.execute(
         "UPDATE paper_lots SET remaining_quantity = 0 WHERE account_id = ?",
@@ -65,7 +66,7 @@ def test_lot_ledger_mismatch_raises(repo):
 
 
 def test_nav_equation_checked_when_present(repo):
-    repo.create_account("demo", Decimal("1000000.00"))
+    repo.create_account("demo", Decimal("1000000.00"), opened_at=ACCOUNT_OPENED_AT)
     repo.connection.execute(
         """
         INSERT INTO paper_nav_snapshots (
