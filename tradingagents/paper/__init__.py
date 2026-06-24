@@ -14,16 +14,21 @@ from tradingagents.paper.exceptions import (
     AccountNotFound,
     IdempotencyConflict,
     InvalidExecutionBatch,
+    InvalidScreenRun,
     LeaseConflict,
     LeaseExpired,
     LeaseNotHeld,
     LeaseTimeout,
     OrderNotFound,
     PaperError,
+    RevisionConflict,
+    ScreeningInputError,
     StaleFencingToken,
 )
 from tradingagents.paper.invariants import InvariantViolation, assert_account_invariants
 from tradingagents.paper.locking import AccountLease, acquire_account_lease, take_over_expired_lease, validate_fencing
+from tradingagents.paper.planner import RebalancePlan, RebalancePlanner
+from tradingagents.paper.screening import ScreeningService
 from tradingagents.paper.repository import (
     AccountProjection,
     AccountSnapshot,
@@ -44,6 +49,7 @@ __all__ = [
     "FillSpec",
     "IdempotencyConflict",
     "InvalidExecutionBatch",
+    "InvalidScreenRun",
     "InvariantViolation",
     "LeaseConflict",
     "LeaseExpired",
@@ -55,7 +61,12 @@ __all__ = [
     "PaperPaths",
     "PaperRepository",
     "PositionProjection",
+    "RebalancePlan",
+    "RebalancePlanner",
+    "RevisionConflict",
     "RunStatus",
+    "ScreeningInputError",
+    "ScreeningService",
     "StaleFencingToken",
     "StepStatus",
     "TargetPortfolioMode",

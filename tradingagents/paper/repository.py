@@ -33,6 +33,7 @@ from tradingagents.paper.exceptions import (
     IdempotencyConflict,
     InvalidExecutionBatch,
     OrderNotFound,
+    PaperError,
     StaleFencingToken,
 )
 from tradingagents.paper.invariants import assert_account_invariants
@@ -925,6 +926,115 @@ class PaperRepository:
             ORDER BY created_at, order_id
             """,
             [account_id],
+        ).fetchall()
+        return [
+            PaperOrder(
+                order_id=row[0],
+                rebalance_run_id=row[1],
+                account_id=row[2],
+                symbol=row[3],
+                side=OrderSide(row[4]),
+                planned_quantity=int(row[5]),
+                filled_quantity=int(row[6]),
+                remaining_quantity=int(row[7]),
+                reference_price_cny=_decimal(row[8]),
+                limit_price_cny=_decimal(row[9]) if row[9] is not None else None,
+                status=OrderStatus(row[10]),
+                rejection_code=row[11],
+                rejection_detail=row[12],
+                created_at=row[13],
+                updated_at=row[14],
+            )
+            for row in rows
+        ]
+
+    def get_frozen_screen_run(self, screen_run_id: str) -> FrozenScreenRun:
+        row = self.connection.execute(
+            """
+            SELECT screen_run_id, screen_content_hash, status, signal_time,
+                   target_portfolio_mode, target_weights_json, cash_weight,
+                   dataset_versions_json, event_dataset_versions_json,
+                   run_report_json, created_at
+            FROM frozen_screen_runs
+            WHERE screen_run_id = ?
+            """,
+            [screen_run_id],
+        ).fetchone()
+        if row is None:
+            raise PaperError(f"screen run {screen_run_id} not found")
+        return FrozenScreenRun(
+            screen_run_id=row[0],
+            screen_content_hash=row[1],
+            status=row[2],
+            signal_time=row[3],
+            target_portfolio_mode=row[4],
+            target_weights_json=row[5],
+            cash_weight=_decimal(row[6]),
+            dataset_versions_json=row[7],
+            event_dataset_versions_json=row[8],
+            run_report_json=row[9],
+            created_at=row[10],
+        )
+
+    def get_active_rebalance_revision(
+        self, logical_run_key: str
+    ) -> RebalanceRevisionSpec | None:
+        row = self.connection.execute(
+            """
+            SELECT rebalance_run_id, account_id, screen_run_id, screen_content_hash,
+                   target_hash, signal_date, signal_time, execution_date,
+                   universe_hash, config_hash, strategy_version,
+                   target_weights_json, logical_run_key, revision, status
+            FROM rebalance_runs
+            WHERE logical_run_key = ? AND is_active_revision = TRUE
+            """,
+            [logical_run_key],
+        ).fetchone()
+        if row is None:
+            return None
+        return RebalanceRevisionSpec(
+            rebalance_run_id=row[0],
+            account_id=row[1],
+            screen_run_id=row[2],
+            screen_content_hash=row[3],
+            target_hash=row[4],
+            signal_date=row[5],
+            signal_time=row[6],
+            execution_date=row[7],
+            universe_hash=row[8],
+            config_hash=row[9],
+            strategy_version=row[10],
+            target_weights_json=row[11],
+            logical_run_key=row[12],
+            revision=int(row[13]),
+            status=RunStatus(row[14]),
+        )
+
+    def rebalance_has_fills(self, rebalance_run_id: str) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT 1
+            FROM paper_fills AS fill
+            JOIN paper_orders AS ord ON ord.order_id = fill.order_id
+            WHERE ord.rebalance_run_id = ?
+            LIMIT 1
+            """,
+            [rebalance_run_id],
+        ).fetchone()
+        return row is not None
+
+    def list_orders_for_rebalance(self, rebalance_run_id: str) -> list[PaperOrder]:
+        rows = self.connection.execute(
+            """
+            SELECT order_id, rebalance_run_id, account_id, symbol, side,
+                   planned_quantity, filled_quantity, remaining_quantity,
+                   reference_price_cny, limit_price_cny, status,
+                   rejection_code, rejection_detail, created_at, updated_at
+            FROM paper_orders
+            WHERE rebalance_run_id = ?
+            ORDER BY side DESC, symbol, order_id
+            """,
+            [rebalance_run_id],
         ).fetchall()
         return [
             PaperOrder(

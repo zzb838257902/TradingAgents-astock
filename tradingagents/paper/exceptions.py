@@ -41,3 +41,15 @@ class OrderNotFound(PaperError):
 
 class InvalidExecutionBatch(PaperError):
     """Execution batch failed validation."""
+
+
+class ScreeningInputError(PaperError):
+    """Screening request or calendar inputs are invalid."""
+
+
+class InvalidScreenRun(PaperError):
+    """Frozen screen run cannot be used for rebalance planning."""
+
+
+class RevisionConflict(PaperError):
+    """Rebalance revision cannot be created or reused."""

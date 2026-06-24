@@ -14,6 +14,9 @@ from tradingagents.market_data.market_hours import SHANGHAI, post_close_signal_t
 from tradingagents.market_data.repository import MarketDataRepository
 from tradingagents.market_data.sync import MarketDataSync, SyncStatus
 from tradingagents.market_data.sync_policy import shanghai_today
+from tradingagents.paper.contracts import TargetPortfolioMode
+from tradingagents.paper.repository import PaperRepository
+from tradingagents.paper.screening import ScreeningService
 from tradingagents.screener.config import ScreenerConfig
 from tradingagents.screener.live import build_fixture_from_repository
 from tradingagents.screener.pipeline import run_screen
@@ -81,6 +84,8 @@ def run_after_close(
     universe_request: UniverseRequest | None = None,
     fixture: dict | None = None,
     force: bool = False,
+    paper_repo: PaperRepository | None = None,
+    target_portfolio_mode: TargetPortfolioMode = TargetPortfolioMode.WEIGHTS,
 ) -> AfterCloseResult:
     signal_time = post_close_signal_time(trade_date)
     if trade_date == shanghai_today():
@@ -211,14 +216,28 @@ def run_after_close(
             trading_dates = _bar_history_trading_dates(repo, trade_date, config)
             fixture = build_fixture_from_repository(repo, symbols, trading_dates, signal_time)
 
-        report = run_screen(
-            fixture,
-            config,
-            paths.live_db_path,
-            reload=False,
-            universe_request=request,
-            run_id=key.storage_id(),
-        )
+        if paper_repo is not None:
+            service = ScreeningService(paper_repo)
+            frozen = service.run(
+                repo,
+                config,
+                request,
+                signal_time,
+                db_path=paths.live_db_path,
+                run_id=key.storage_id(),
+                target_mode=target_portfolio_mode,
+                fixture=fixture,
+            )
+            report = RunReport.model_validate_json(frozen.run_report_json)
+        else:
+            report = run_screen(
+                fixture,
+                config,
+                paths.live_db_path,
+                reload=False,
+                universe_request=request,
+                run_id=key.storage_id(),
+            )
         payload = report.to_output_dict()
         payload["sync_steps"] = sync_steps
         path = store.save_report(key, payload)
