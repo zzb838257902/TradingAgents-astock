@@ -10,9 +10,7 @@ import pytest
 from tradingagents.paper.invariants import InvariantViolation, assert_account_invariants
 from tests.paper.conftest import (
     TRADE_DATE,
-    append_cash_with_lease,
     append_position_with_lease,
-    cash_entry,
     position_entry,
     rebuild_projection_with_lease,
     seed_execution_orders,
@@ -26,7 +24,6 @@ def test_assert_account_invariants_passes_for_seeded_account(repo):
 
 def test_assert_account_invariants_passes_after_projection_seed(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    append_cash_with_lease(repo, cash_entry())
     append_position_with_lease(repo, position_entry())
     rebuild_projection_with_lease(repo, "demo")
     assert_account_invariants(repo.connection, "demo", as_of_date=TRADE_DATE)

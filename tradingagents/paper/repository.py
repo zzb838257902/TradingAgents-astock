@@ -173,11 +173,38 @@ def _hash_payload(payload: dict[str, Any]) -> str:
 
 
 def _cash_payload_hash(entry: CashEntry) -> str:
+    occurred_at = entry.occurred_at
+    occurred_iso = (
+        occurred_at.isoformat()
+        if isinstance(occurred_at, datetime)
+        else str(occurred_at)
+    )
     return _hash_payload(
         {
             "entry_type": entry.entry_type.value,
             "amount_cny": str(money(entry.amount_cny)),
+            "occurred_at": occurred_iso,
         }
+    )
+
+
+def _cash_entry_payload_from_row(
+    row: tuple[object, ...],
+    *,
+    account_id: str,
+    source_type: str,
+    source_id: str,
+    component: str,
+) -> CashEntry:
+    return CashEntry(
+        cash_entry_id=str(row[0]),
+        account_id=account_id,
+        entry_type=CashEntryType(str(row[1])),
+        amount_cny=_decimal(row[2]),
+        source_type=source_type,
+        source_id=source_id,
+        component=component,
+        occurred_at=row[3],  # type: ignore[arg-type]
     )
 
 
@@ -239,7 +266,6 @@ def _rebalance_spec_payload_hash(spec: RebalanceRevisionSpec) -> str:
             "target_weights_json": spec.target_weights_json,
             "logical_run_key": spec.logical_run_key,
             "revision": spec.revision,
-            "status": spec.status.value,
         }
     )
 
@@ -258,18 +284,19 @@ def _order_creation_payload_hash(order: PaperOrder) -> str:
                 if order.limit_price_cny is not None
                 else None
             ),
-            "rejection_code": order.rejection_code,
-            "rejection_detail": order.rejection_detail,
         }
     )
 
 
-def _fill_payload_hash(fill: FillSpec, execution_date: date) -> str:
+def _fill_payload_hash(
+    fill: FillSpec, execution_date: date, execution_time: datetime
+) -> str:
     return _hash_payload(
         {
             "account_id": fill.account_id,
             "symbol": fill.symbol,
             "execution_date": execution_date.isoformat(),
+            "execution_time": execution_time.isoformat(),
             "quantity": fill.quantity,
             "price_cny": str(money(fill.price_cny)),
             "commission_cny": str(money(fill.commission_cny)),
@@ -325,18 +352,18 @@ class PaperRepository:
                     """,
                     [account_id, now],
                 )
-            self._append_cash_entry_in_tx(
-                CashEntry(
-                    cash_entry_id=_new_id("cash"),
-                    account_id=account_id,
-                    entry_type=CashEntryType.DEPOSIT,
-                    amount_cny=initial,
-                    source_type="ACCOUNT",
-                    source_id=account_id,
-                    component="INITIAL_CASH",
-                    occurred_at=now,
-                ),
-            )
+                self._append_cash_entry_in_tx(
+                    CashEntry(
+                        cash_entry_id=_new_id("cash"),
+                        account_id=account_id,
+                        entry_type=CashEntryType.DEPOSIT,
+                        amount_cny=initial,
+                        source_type="ACCOUNT",
+                        source_id=account_id,
+                        component="INITIAL_CASH",
+                        occurred_at=now,
+                    ),
+                )
             self.connection.execute("COMMIT")
         except Exception:
             self.connection.execute("ROLLBACK")
@@ -389,13 +416,14 @@ class PaperRepository:
             [entry.account_id, entry.source_type, entry.source_id, entry.component],
         ).fetchone()
         if existing is not None:
-            existing_hash = _hash_payload(
-                {
-                    "entry_type": existing[1],
-                    "amount_cny": str(money(_decimal(existing[2]))),
-                }
+            existing_entry = _cash_entry_payload_from_row(
+                existing,
+                account_id=entry.account_id,
+                source_type=entry.source_type,
+                source_id=entry.source_id,
+                component=entry.component,
             )
-            if existing_hash != payload_hash:
+            if _cash_payload_hash(existing_entry) != payload_hash:
                 raise IdempotencyConflict(
                     f"cash entry conflict for {entry.account_id}/{entry.component}"
                 )
@@ -674,165 +702,215 @@ class PaperRepository:
                 self.connection.execute("ROLLBACK")
             raise
 
-    def create_rebalance_revision(self, spec: RebalanceRevisionSpec) -> str:
+    def create_rebalance_revision(
+        self,
+        spec: RebalanceRevisionSpec,
+        *,
+        fencing_token: int,
+        owner_id: str,
+    ) -> str:
+        with account_transaction_lock(self.paths.home_dir, spec.account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                rebalance_run_id = self._create_rebalance_revision_in_tx(spec)
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=spec.account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+        return rebalance_run_id
+
+    def _create_rebalance_revision_in_tx(self, spec: RebalanceRevisionSpec) -> str:
         created_at = datetime.now(tz=SHANGHAI)
         payload_hash = _rebalance_spec_payload_hash(spec)
-        self.connection.execute("BEGIN")
-        try:
-            existing = self.connection.execute(
+        existing = self.connection.execute(
+            """
+            SELECT account_id, screen_run_id, screen_content_hash, target_hash,
+                   signal_date, signal_time, execution_date, universe_hash,
+                   config_hash, strategy_version, target_weights_json,
+                   logical_run_key, revision, status
+            FROM rebalance_runs
+            WHERE rebalance_run_id = ?
+            """,
+            [spec.rebalance_run_id],
+        ).fetchone()
+        if existing is not None:
+            existing_spec = RebalanceRevisionSpec(
+                rebalance_run_id=spec.rebalance_run_id,
+                account_id=existing[0],
+                screen_run_id=existing[1],
+                screen_content_hash=existing[2],
+                target_hash=existing[3],
+                signal_date=existing[4],
+                signal_time=existing[5],
+                execution_date=existing[6],
+                universe_hash=existing[7],
+                config_hash=existing[8],
+                strategy_version=existing[9],
+                target_weights_json=existing[10],
+                logical_run_key=existing[11],
+                revision=int(existing[12]),
+                status=RunStatus(existing[13]),
+            )
+            if _rebalance_spec_payload_hash(existing_spec) != payload_hash:
+                raise IdempotencyConflict(
+                    f"rebalance revision conflict for {spec.rebalance_run_id}"
+                )
+        else:
+            self.connection.execute(
                 """
-                SELECT account_id, screen_run_id, screen_content_hash, target_hash,
-                       signal_date, signal_time, execution_date, universe_hash,
-                       config_hash, strategy_version, target_weights_json,
-                       logical_run_key, revision, status
-                FROM rebalance_runs
-                WHERE rebalance_run_id = ?
+                UPDATE rebalance_runs
+                SET is_active_revision = FALSE,
+                    active_revision_slot = revision
+                WHERE logical_run_key = ? AND is_active_revision = TRUE
                 """,
-                [spec.rebalance_run_id],
-            ).fetchone()
-            if existing is not None:
-                existing_spec = RebalanceRevisionSpec(
-                    rebalance_run_id=spec.rebalance_run_id,
-                    account_id=existing[0],
-                    screen_run_id=existing[1],
-                    screen_content_hash=existing[2],
-                    target_hash=existing[3],
-                    signal_date=existing[4],
-                    signal_time=existing[5],
-                    execution_date=existing[6],
-                    universe_hash=existing[7],
-                    config_hash=existing[8],
-                    strategy_version=existing[9],
-                    target_weights_json=existing[10],
-                    logical_run_key=existing[11],
-                    revision=int(existing[12]),
-                    status=RunStatus(existing[13]),
-                )
-                if _rebalance_spec_payload_hash(existing_spec) != payload_hash:
-                    raise IdempotencyConflict(
-                        f"rebalance revision conflict for {spec.rebalance_run_id}"
-                    )
-            else:
-                self.connection.execute(
-                    """
-                    UPDATE rebalance_runs
-                    SET is_active_revision = FALSE,
-                        active_revision_slot = revision
-                    WHERE logical_run_key = ? AND is_active_revision = TRUE
-                    """,
-                    [spec.logical_run_key],
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO rebalance_runs (
-                        rebalance_run_id, account_id, screen_run_id, screen_content_hash,
-                        target_hash, signal_date, signal_time, execution_date,
-                        universe_hash, config_hash, strategy_version, target_weights_json,
-                        logical_run_key, revision, is_active_revision, active_revision_slot,
-                        status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 0, ?, ?)
-                    """,
-                    [
-                        spec.rebalance_run_id,
-                        spec.account_id,
-                        spec.screen_run_id,
-                        spec.screen_content_hash,
-                        spec.target_hash,
-                        spec.signal_date,
-                        spec.signal_time,
-                        spec.execution_date,
-                        spec.universe_hash,
-                        spec.config_hash,
-                        spec.strategy_version,
-                        spec.target_weights_json,
-                        spec.logical_run_key,
-                        spec.revision,
-                        spec.status.value,
-                        created_at,
-                    ],
-                )
-            self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
+                [spec.logical_run_key],
+            )
+            self.connection.execute(
+                """
+                INSERT INTO rebalance_runs (
+                    rebalance_run_id, account_id, screen_run_id, screen_content_hash,
+                    target_hash, signal_date, signal_time, execution_date,
+                    universe_hash, config_hash, strategy_version, target_weights_json,
+                    logical_run_key, revision, is_active_revision, active_revision_slot,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 0, ?, ?)
+                """,
+                [
+                    spec.rebalance_run_id,
+                    spec.account_id,
+                    spec.screen_run_id,
+                    spec.screen_content_hash,
+                    spec.target_hash,
+                    spec.signal_date,
+                    spec.signal_time,
+                    spec.execution_date,
+                    spec.universe_hash,
+                    spec.config_hash,
+                    spec.strategy_version,
+                    spec.target_weights_json,
+                    spec.logical_run_key,
+                    spec.revision,
+                    spec.status.value,
+                    created_at,
+                ],
+            )
         return spec.rebalance_run_id
 
-    def insert_orders(self, orders: list[PaperOrder]) -> list[str]:
+    def insert_orders(
+        self,
+        orders: list[PaperOrder],
+        *,
+        fencing_token: int,
+        owner_id: str,
+    ) -> list[str]:
         if not orders:
             return []
+        account_ids = {order.account_id for order in orders}
+        if len(account_ids) != 1:
+            raise InvalidExecutionBatch("insert_orders requires a single account_id")
+        account_id = next(iter(account_ids))
+        with account_transaction_lock(self.paths.home_dir, account_id):
+            self.connection.execute("BEGIN")
+            try:
+                validate_fencing(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                inserted = self._insert_orders_in_tx(orders)
+                assert_fencing_commit_guard(
+                    self.connection,
+                    account_id=account_id,
+                    fencing_token=fencing_token,
+                    owner_id=owner_id,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+        return inserted
+
+    def _insert_orders_in_tx(self, orders: list[PaperOrder]) -> list[str]:
         now = datetime.now(tz=SHANGHAI)
         inserted: list[str] = []
-        self.connection.execute("BEGIN")
-        try:
-            for order in orders:
-                payload_hash = _order_creation_payload_hash(order)
-                existing = self.connection.execute(
-                    """
-                    SELECT rebalance_run_id, account_id, symbol, side,
-                           planned_quantity, filled_quantity, remaining_quantity,
-                           reference_price_cny, limit_price_cny, status,
-                           rejection_code, rejection_detail
-                    FROM paper_orders
-                    WHERE order_id = ?
-                    """,
-                    [order.order_id],
-                ).fetchone()
-                if existing is not None:
-                    existing_order = PaperOrder(
-                        order_id=order.order_id,
-                        rebalance_run_id=existing[0],
-                        account_id=existing[1],
-                        symbol=existing[2],
-                        side=OrderSide(existing[3]),
-                        planned_quantity=int(existing[4]),
-                        filled_quantity=int(existing[5]),
-                        remaining_quantity=int(existing[6]),
-                        reference_price_cny=_decimal(existing[7]),
-                        limit_price_cny=_decimal(existing[8]) if existing[8] is not None else None,
-                        status=OrderStatus(existing[9]),
-                        rejection_code=existing[10],
-                        rejection_detail=existing[11],
-                    )
-                    if _order_creation_payload_hash(existing_order) != payload_hash:
-                        raise IdempotencyConflict(
-                            f"order conflict for {order.order_id}"
-                        )
-                    inserted.append(order.order_id)
-                    continue
-                created_at = order.created_at or now
-                updated_at = order.updated_at or now
-                self.connection.execute(
-                    """
-                    INSERT INTO paper_orders (
-                        order_id, rebalance_run_id, account_id, symbol, side,
-                        planned_quantity, filled_quantity, remaining_quantity,
-                        reference_price_cny, limit_price_cny, status,
-                        rejection_code, rejection_detail, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        order.order_id,
-                        order.rebalance_run_id,
-                        order.account_id,
-                        order.symbol,
-                        order.side.value,
-                        order.planned_quantity,
-                        order.filled_quantity,
-                        order.remaining_quantity,
-                        order.reference_price_cny,
-                        order.limit_price_cny,
-                        order.status.value,
-                        order.rejection_code,
-                        order.rejection_detail,
-                        created_at,
-                        updated_at,
-                    ],
+        for order in orders:
+            payload_hash = _order_creation_payload_hash(order)
+            existing = self.connection.execute(
+                """
+                SELECT rebalance_run_id, account_id, symbol, side,
+                       planned_quantity, filled_quantity, remaining_quantity,
+                       reference_price_cny, limit_price_cny, status,
+                       rejection_code, rejection_detail
+                FROM paper_orders
+                WHERE order_id = ?
+                """,
+                [order.order_id],
+            ).fetchone()
+            if existing is not None:
+                existing_order = PaperOrder(
+                    order_id=order.order_id,
+                    rebalance_run_id=existing[0],
+                    account_id=existing[1],
+                    symbol=existing[2],
+                    side=OrderSide(existing[3]),
+                    planned_quantity=int(existing[4]),
+                    filled_quantity=int(existing[5]),
+                    remaining_quantity=int(existing[6]),
+                    reference_price_cny=_decimal(existing[7]),
+                    limit_price_cny=_decimal(existing[8]) if existing[8] is not None else None,
+                    status=OrderStatus(existing[9]),
+                    rejection_code=existing[10],
+                    rejection_detail=existing[11],
                 )
+                if _order_creation_payload_hash(existing_order) != payload_hash:
+                    raise IdempotencyConflict(
+                        f"order conflict for {order.order_id}"
+                    )
                 inserted.append(order.order_id)
-            self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
-            raise
+                continue
+            created_at = order.created_at or now
+            updated_at = order.updated_at or now
+            self.connection.execute(
+                """
+                INSERT INTO paper_orders (
+                    order_id, rebalance_run_id, account_id, symbol, side,
+                    planned_quantity, filled_quantity, remaining_quantity,
+                    reference_price_cny, limit_price_cny, status,
+                    rejection_code, rejection_detail, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    order.order_id,
+                    order.rebalance_run_id,
+                    order.account_id,
+                    order.symbol,
+                    order.side.value,
+                    order.planned_quantity,
+                    order.filled_quantity,
+                    order.remaining_quantity,
+                    order.reference_price_cny,
+                    order.limit_price_cny,
+                    order.status.value,
+                    order.rejection_code,
+                    order.rejection_detail,
+                    created_at,
+                    updated_at,
+                ],
+            )
+            inserted.append(order.order_id)
         return inserted
 
     def list_orders(self, account_id: str) -> list[PaperOrder]:
@@ -961,7 +1039,8 @@ class PaperRepository:
                         """
                         SELECT fill_id, account_id, symbol, quantity, price_cny,
                                commission_cny, stamp_tax_cny, other_fee_cny,
-                               source_snapshot_key, source_snapshot_version_id
+                               source_snapshot_key, source_snapshot_version_id,
+                               execution_time
                         FROM paper_fills
                         WHERE order_id = ? AND execution_date = ? AND fill_sequence = ?
                         """,
@@ -1026,6 +1105,7 @@ class PaperRepository:
                             ],
                         )
                     else:
+                        existing_execution_time = existing_fill[10]
                         existing_spec = FillSpec(
                             fill_id=str(existing_fill[0]),
                             order_id=fill.order_id,
@@ -1040,8 +1120,10 @@ class PaperRepository:
                             source_snapshot_key=existing_fill[8],
                             source_snapshot_version_id=existing_fill[9],
                         )
-                        if _fill_payload_hash(existing_spec, batch.execution_date) != _fill_payload_hash(
-                            fill, batch.execution_date
+                        if _fill_payload_hash(
+                            existing_spec, batch.execution_date, existing_execution_time
+                        ) != _fill_payload_hash(
+                            fill, batch.execution_date, batch.execution_time
                         ):
                             raise IdempotencyConflict(
                                 f"fill conflict for {fill.order_id}/{batch.execution_date}/{fill.fill_sequence}"
@@ -1309,13 +1391,14 @@ class PaperRepository:
             [entry.account_id, entry.source_type, entry.source_id, entry.component],
         ).fetchone()
         if existing is not None:
-            existing_hash = _hash_payload(
-                {
-                    "entry_type": existing[1],
-                    "amount_cny": str(money(_decimal(existing[2]))),
-                }
+            existing_entry = _cash_entry_payload_from_row(
+                existing,
+                account_id=entry.account_id,
+                source_type=entry.source_type,
+                source_id=entry.source_id,
+                component=entry.component,
             )
-            if existing_hash != payload_hash:
+            if _cash_payload_hash(existing_entry) != payload_hash:
                 raise IdempotencyConflict(
                     f"cash entry conflict for {entry.account_id}/{entry.component}"
                 )

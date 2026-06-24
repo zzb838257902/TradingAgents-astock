@@ -147,6 +147,34 @@ def make_partial_execution_batch(
     )
 
 
+def create_rebalance_with_lease(
+    repo: PaperRepository,
+    spec: RebalanceRevisionSpec,
+    *,
+    owner_id: str = "executor",
+) -> str:
+    lease = acquire_test_lease(repo, spec.account_id, owner_id=owner_id)
+    return repo.create_rebalance_revision(
+        spec,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+
+
+def insert_orders_with_lease(
+    repo: PaperRepository,
+    orders: list[PaperOrder],
+    *,
+    owner_id: str = "executor",
+) -> list[str]:
+    lease = acquire_test_lease(repo, orders[0].account_id, owner_id=owner_id)
+    return repo.insert_orders(
+        orders,
+        fencing_token=lease.token,
+        owner_id=lease.owner_id,
+    )
+
+
 def seed_partial_execution_orders(
     repo: PaperRepository,
     *,
@@ -169,7 +197,8 @@ def seed_partial_execution_orders(
             run_report_json="{}",
         )
     )
-    repo.create_rebalance_revision(
+    create_rebalance_with_lease(
+        repo,
         RebalanceRevisionSpec(
             rebalance_run_id=rebalance_run_id,
             account_id=account_id,
@@ -186,9 +215,11 @@ def seed_partial_execution_orders(
             logical_run_key=f"{account_id}:{TRADE_DATE}:uni-1",
             revision=1,
             status=RunStatus.PENDING,
-        )
+        ),
+        owner_id=owner_id,
     )
-    repo.insert_orders(
+    insert_orders_with_lease(
+        repo,
         [
             PaperOrder(
                 order_id=order_id,
@@ -201,8 +232,10 @@ def seed_partial_execution_orders(
                 reference_price_cny=Decimal("10.00"),
                 status=OrderStatus.PENDING,
             )
-        ]
+        ],
+        owner_id=owner_id,
     )
+    repo.expire_lease_for_test(account_id)
 
 
 def seed_demo_account(repo: PaperRepository, *, account_id: str = "demo") -> None:
@@ -230,7 +263,8 @@ def seed_execution_orders(
             run_report_json="{}",
         )
     )
-    repo.create_rebalance_revision(
+    create_rebalance_with_lease(
+        repo,
         RebalanceRevisionSpec(
             rebalance_run_id=rebalance_run_id,
             account_id=account_id,
@@ -247,9 +281,11 @@ def seed_execution_orders(
             logical_run_key=f"{account_id}:{TRADE_DATE}:uni-1",
             revision=1,
             status=RunStatus.PENDING,
-        )
+        ),
+        owner_id=owner_id,
     )
-    repo.insert_orders(
+    insert_orders_with_lease(
+        repo,
         [
             PaperOrder(
                 order_id=order_id,
@@ -262,8 +298,10 @@ def seed_execution_orders(
                 reference_price_cny=Decimal("10.00"),
                 status=OrderStatus.PENDING,
             )
-        ]
+        ],
+        owner_id=owner_id,
     )
+    repo.expire_lease_for_test(account_id)
 
 
 def cash_entry(
@@ -273,6 +311,7 @@ def cash_entry(
     component: str = "INITIAL_CASH",
     source_id: str = "demo",
     entry_id: str = "cash-test-1",
+    occurred_at: datetime = SIGNAL_TIME,
 ) -> CashEntry:
     return CashEntry(
         cash_entry_id=entry_id,
@@ -282,7 +321,7 @@ def cash_entry(
         source_type="ACCOUNT",
         source_id=source_id,
         component=component,
-        occurred_at=SIGNAL_TIME,
+        occurred_at=occurred_at,
     )
 
 

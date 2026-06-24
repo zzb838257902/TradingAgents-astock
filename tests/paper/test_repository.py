@@ -2,23 +2,32 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from tradingagents.paper.config import PaperPaths
-from tradingagents.paper.contracts import FrozenScreenRun, OrderSide, OrderStatus, PaperOrder, TargetPortfolioMode
+from tradingagents.paper.contracts import (
+    FrozenScreenRun,
+    OrderSide,
+    OrderStatus,
+    PaperOrder,
+    RunStatus,
+    TargetPortfolioMode,
+)
 from tradingagents.paper.exceptions import IdempotencyConflict, StaleFencingToken
 from tradingagents.paper.invariants import assert_account_invariants
-from tradingagents.paper.repository import ValuationWriteSpec
+from tradingagents.paper.repository import ExecutionBatch, RebalanceRevisionSpec, ValuationWriteSpec
 from tests.paper.conftest import (
     EXECUTION_BATCH,
+    EXECUTION_TIME,
     SIGNAL_TIME,
     TRADE_DATE,
     append_cash_with_lease,
     append_position_with_lease,
     cash_entry,
+    insert_orders_with_lease,
     make_execution_batch,
     make_partial_execution_batch,
     position_entry,
@@ -59,7 +68,6 @@ def test_create_account_appends_initial_cash_idempotently(repo):
 
 def test_cash_and_position_projection_rebuild_from_ledgers(repo):
     repo.create_account("demo", Decimal("1000000.00"))
-    append_cash_with_lease(repo, cash_entry())
     append_position_with_lease(repo, position_entry())
     rebuilt = rebuild_projection_with_lease(repo, "demo")
     assert rebuilt.cash_cny == Decimal("1000000.00")
@@ -295,8 +303,40 @@ def test_insert_orders_conflict_raises(repo):
     seed_execution_orders(repo)
     orders = repo.list_orders("demo")
     conflicting = orders[0].model_copy(update={"planned_quantity": 2000})
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
     with pytest.raises(IdempotencyConflict):
-        repo.insert_orders([conflicting])
+        repo.insert_orders(
+            [conflicting],
+            fencing_token=lease.token,
+            owner_id=lease.owner_id,
+        )
+
+
+def test_create_rebalance_without_fencing_raises(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    spec = RebalanceRevisionSpec(
+        rebalance_run_id="reb-x",
+        account_id="demo",
+        screen_run_id="screen-1",
+        screen_content_hash="hash",
+        target_hash="target",
+        signal_date=SIGNAL_TIME.date(),
+        signal_time=SIGNAL_TIME,
+        execution_date=TRADE_DATE,
+        universe_hash="uni",
+        config_hash="cfg",
+        strategy_version="v1",
+        target_weights_json="{}",
+        logical_run_key="demo:run",
+    )
+    with pytest.raises(TypeError):
+        repo.create_rebalance_revision(spec)
+
+
+def test_insert_orders_without_fencing_raises(repo):
+    seed_execution_orders(repo)
+    with pytest.raises(TypeError):
+        repo.insert_orders(repo.list_orders("demo"))
 
 
 def test_insert_orders_idempotent_after_execution(repo):
@@ -315,7 +355,105 @@ def test_insert_orders_idempotent_after_execution(repo):
     lease = repo.acquire_account_lease("demo", owner_id="executor")
     repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
     assert repo.list_orders("demo")[0].status == OrderStatus.FILLED
-    repo.insert_orders([original_order])
+    lease2 = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.insert_orders(
+        [original_order],
+        fencing_token=lease2.token,
+        owner_id=lease2.owner_id,
+    )
+
+
+def test_rebalance_revision_idempotent_after_completed(repo):
+    seed_execution_orders(repo)
+    original_spec = RebalanceRevisionSpec(
+        rebalance_run_id="reb-1",
+        account_id="demo",
+        screen_run_id="screen-1",
+        screen_content_hash="hash-screen-1",
+        target_hash="hash-target-1",
+        signal_date=SIGNAL_TIME.date(),
+        signal_time=SIGNAL_TIME,
+        execution_date=TRADE_DATE,
+        universe_hash="uni-1",
+        config_hash="cfg-1",
+        strategy_version="v1",
+        target_weights_json='{"600000": 0.1}',
+        logical_run_key=f"demo:{TRADE_DATE}:uni-1",
+        revision=1,
+        status=RunStatus.PENDING,
+    )
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
+    lease2 = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.create_rebalance_revision(
+        original_spec,
+        fencing_token=lease2.token,
+        owner_id=lease2.owner_id,
+    )
+
+
+def test_order_idempotent_after_rejection_metadata(repo):
+    seed_execution_orders(repo)
+    original_order = PaperOrder(
+        order_id="ord-buy-600000",
+        rebalance_run_id="reb-1",
+        account_id="demo",
+        symbol="600000",
+        side=OrderSide.BUY,
+        planned_quantity=1000,
+        remaining_quantity=1000,
+        reference_price_cny=Decimal("10.00"),
+        status=OrderStatus.PENDING,
+    )
+    repo.connection.execute(
+        """
+        UPDATE paper_orders
+        SET status = 'REJECTED', rejection_code = 'LIMIT', rejection_detail = 'hit limit'
+        WHERE order_id = ?
+        """,
+        ["ord-buy-600000"],
+    )
+    insert_orders_with_lease(repo, [original_order])
+
+
+def test_cash_entry_different_occurred_at_raises(repo):
+    repo.create_account("demo", Decimal("1000000.00"))
+    append_cash_with_lease(
+        repo,
+        cash_entry(
+            entry_id="cash-a",
+            component="BONUS",
+            source_id="promo-1",
+            amount_cny=Decimal("100.00"),
+        ),
+    )
+    with pytest.raises(IdempotencyConflict):
+        append_cash_with_lease(
+            repo,
+            cash_entry(
+                entry_id="cash-b",
+                component="BONUS",
+                source_id="promo-1",
+                amount_cny=Decimal("100.00"),
+                occurred_at=SIGNAL_TIME + timedelta(days=1),
+            ),
+        )
+
+
+def test_fill_different_execution_time_raises(repo):
+    seed_execution_orders(repo)
+    lease = repo.acquire_account_lease("demo", owner_id="executor")
+    repo.apply_execution_batch(EXECUTION_BATCH, fencing_token=lease.token)
+    conflicting = ExecutionBatch(
+        account_id="demo",
+        rebalance_run_id="reb-1",
+        execution_date=TRADE_DATE,
+        execution_time=EXECUTION_TIME + timedelta(hours=1),
+        owner_id="executor",
+        fills=EXECUTION_BATCH.fills,
+    )
+    with pytest.raises(IdempotencyConflict):
+        repo.apply_execution_batch(conflicting, fencing_token=lease.token)
 
 
 def test_duplicate_fill_key_different_payload_raises(repo):
