@@ -1,0 +1,68 @@
+from datetime import date
+
+from tradingagents.screener.models import CandidateInput
+from tradingagents.screener.universe import filter_universe
+
+
+def candidate(symbol: str, **changes):
+    values = {
+        "symbol": symbol,
+        "name": symbol,
+        "industry": "电子",
+        "list_date": date(2020, 1, 1),
+        "st_flag": False,
+        "suspended": False,
+        "avg_amount_20d": 100_000_000,
+    }
+    values.update(changes)
+    return CandidateInput(**values)
+
+
+def test_filters_st_new_suspended_and_illiquid_stocks():
+    result = filter_universe(
+        [
+            candidate("A"),
+            candidate("B", st_flag=True),
+            candidate("C", list_date=date(2025, 12, 20)),
+            candidate("D", suspended=True),
+            candidate("E", avg_amount_20d=10_000),
+        ],
+        as_of=date(2026, 1, 5),
+        min_listing_days=60,
+        min_avg_amount_20d=50_000_000,
+    )
+    assert [item.symbol for item in result.included] == ["A"]
+    assert result.excluded_reasons == {
+        "B": ["st"], "C": ["new_listing"], "D": ["suspended"],
+        "E": ["illiquid"]
+    }
+
+
+def test_new_listing_uses_trading_days_not_calendar_days():
+    trading_dates = [
+        date(2025, 12, 22), date(2025, 12, 23), date(2025, 12, 24), date(2025, 12, 25),
+    ]
+    result = filter_universe(
+        [candidate("C", list_date=date(2025, 12, 20))],
+        as_of=date(2025, 12, 25),
+        min_listing_days=5,
+        min_avg_amount_20d=1,
+        trading_dates=trading_dates,
+    )
+    assert result.included == []
+    assert result.excluded_reasons["C"] == ["new_listing"]
+
+
+def test_listing_days_use_full_calendar_not_bar_window():
+    short_bar_window = [date(2026, 6, 12), date(2026, 6, 15), date(2026, 6, 16), date(2026, 6, 17)]
+    full_calendar = [date(2026, 1, 2) + __import__("datetime").timedelta(days=i) for i in range(200)]
+    full_calendar = [day for day in full_calendar if day.weekday() < 5]
+    result = filter_universe(
+        [candidate("OLD", list_date=date(1999, 11, 10))],
+        as_of=date(2026, 6, 17),
+        min_listing_days=60,
+        min_avg_amount_20d=1,
+        trading_dates=short_bar_window,
+        listing_trade_dates=full_calendar,
+    )
+    assert [item.symbol for item in result.included] == ["OLD"]

@@ -14,8 +14,8 @@ Data sources:
 
 from __future__ import annotations
 
-from typing import Annotated
-from datetime import datetime
+from typing import Annotated, Any
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 import json as _json
 import os
@@ -81,17 +81,17 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     if _name_to_code is not None:
         return _name_to_code, _code_to_name
 
-    from mootdx.quotes import Quotes
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
-    client = Quotes.factory(market="std")
+    manager = get_mootdx_manager()
     n2c: dict[str, str] = {}
     c2n: dict[str, str] = {}
 
     for market in (0, 1):  # 0=SZ, 1=SH
-        stocks = client.stocks(market=market)
-        if stocks is None or stocks.empty:
+        frame = manager.call(lambda client, m=market: client.stocks(market=m))
+        if frame is None or frame.empty:
             continue
-        for _, row in stocks.iterrows():
+        for _, row in frame.iterrows():
             code = str(row["code"]).strip()
             name = str(row["name"]).strip()
             if not _re.match(r"^[036]\d{5}$", code):
@@ -142,17 +142,18 @@ def resolve_ticker(user_input: str) -> str:
 # mootdx client (singleton)
 # ---------------------------------------------------------------------------
 
-_mootdx_client = None
+
+def _call_mootdx(operation):
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
+
+    return get_mootdx_manager().call(operation)
 
 
 def _get_mootdx_client():
     """Lazy-init mootdx Quotes client (TCP connection, reusable)."""
-    global _mootdx_client
-    if _mootdx_client is None:
-        from mootdx.quotes import Quotes
+    from tradingagents.dataflows.mootdx_connection import get_mootdx_manager
 
-        _mootdx_client = Quotes.factory(market="std")
-    return _mootdx_client
+    return get_mootdx_manager().connect()
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +297,8 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     return dfs[0] if dfs else pd.DataFrame()
 
 
-# ---------------------------------------------------------------------------
-# Sina K-line fallback helper (direct HTTP, no akshare)
-# ---------------------------------------------------------------------------
+# Sina SSE index daily bars cap the trade-calendar lookback window.
+SINA_SSE_CALENDAR_MAX_BARS = 800
 
 
 def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
@@ -315,7 +315,7 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
         "symbol": f"{prefix}{code}",
         "scale": "240",  # daily
         "ma": "no",
-        "datalen": "800",
+        "datalen": str(SINA_SSE_CALENDAR_MAX_BARS),
     }
     r = _requests.get(url, params=params, timeout=15)
     r.raise_for_status()
@@ -344,6 +344,72 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
         df = df[df["Date"] <= pd.to_datetime(end_date)]
 
     return df
+
+
+# mootdx daily volume is reported in lots (手); normalize to shares (股).
+_MOOTDX_VOLUME_LOT_SIZE = 100
+
+
+def _normalize_mootdx_daily_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize mootdx OHLCV to shares (volume) and yuan (amount)."""
+    out = df.copy()
+    out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce") * _MOOTDX_VOLUME_LOT_SIZE
+    if "Amount" in out.columns:
+        out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce")
+    else:
+        out["Amount"] = pd.to_numeric(out["Close"], errors="coerce") * out["Volume"]
+    return out
+
+
+def _normalize_sina_daily_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Sina K-line volume is already in shares; derive amount in yuan."""
+    out = df.copy()
+    out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce")
+    out["Amount"] = pd.to_numeric(out["Close"], errors="coerce") * out["Volume"]
+    return out
+
+
+def _supplement_kline_from_sina(
+    df: pd.DataFrame,
+    code: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[pd.DataFrame, bool]:
+    """Fill in-range mootdx gaps with Sina daily bars."""
+    if df is None or df.empty:
+        return df, False
+    try:
+        sina_df = _sina_kline_fallback(code, start_date, end_date)
+    except Exception as exc:
+        logger.debug("sina gap fill skipped for %s: %s", code, exc)
+        return df, False
+    if sina_df.empty:
+        return df, False
+
+    base = df.copy()
+    base["Date"] = pd.to_datetime(base["Date"])
+    sina_df = _normalize_sina_daily_frame(sina_df.copy())
+    sina_df["Date"] = pd.to_datetime(sina_df["Date"])
+    have = set(base["Date"].dt.normalize())
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    extra = sina_df[
+        (sina_df["Date"] >= start_dt)
+        & (sina_df["Date"] <= end_dt)
+        & (~sina_df["Date"].dt.normalize().isin(have))
+    ]
+    if extra.empty:
+        return base, False
+    if "Amount" not in extra.columns:
+        extra = extra.assign(Amount=0.0)
+    if "Amount" not in base.columns:
+        base = base.assign(Amount=0.0)
+    combined = pd.concat(
+        [base, extra[["Date", "Open", "High", "Low", "Close", "Volume", "Amount"]]],
+        ignore_index=True,
+    )
+    combined = combined.sort_values("Date").reset_index(drop=True)
+    return combined, True
 
 
 # ---------------------------------------------------------------------------
@@ -377,8 +443,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Fetch from mootdx — 800 daily bars (~3 years of trading days)
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        df = _call_mootdx(lambda client: client.bars(symbol=code, category=4, offset=800))
 
         if df is None or df.empty:
             raise ValueError(f"No OHLCV data from mootdx for {code}")
@@ -398,6 +463,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
         df = df.rename(columns=rename_map)
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df["Date"] = pd.to_datetime(df["Date"])
+        df = _normalize_mootdx_daily_frame(df)
     except Exception as e:
         logger.warning("mootdx OHLCV failed for %s: %s, trying sina HTTP fallback", code, e)
         # Fallback: Sina direct HTTP API
@@ -405,6 +471,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
             df = _sina_kline_fallback(code)
             if df.empty:
                 raise ValueError(f"No OHLCV data from sina for {code}")
+            df = _normalize_sina_daily_frame(df)
         except Exception:
             raise ValueError(f"No OHLCV data from mootdx/sina for {code}")
 
@@ -434,8 +501,7 @@ def get_stock_data(
 
     data_source = "mootdx (TCP)"
     try:
-        client = _get_mootdx_client()
-        df = client.bars(symbol=code, category=4, offset=800)
+        df = _call_mootdx(lambda client: client.bars(symbol=code, category=4, offset=800))
 
         if df is None or df.empty:
             raise ValueError(f"No data from mootdx for {code}")
@@ -458,6 +524,7 @@ def get_stock_data(
             }
         )
         df["Date"] = pd.to_datetime(df["Date"])
+        df = _normalize_mootdx_daily_frame(df)
 
     except Exception as e:
         logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
@@ -466,6 +533,7 @@ def get_stock_data(
             df = _sina_kline_fallback(code, start_date, end_date)
             if df.empty:
                 return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+            df = _normalize_sina_daily_frame(df)
             data_source = "sina HTTP (fallback)"
         except Exception:
             return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
@@ -480,6 +548,13 @@ def get_stock_data(
             f"No data found for A-stock '{code}' "
             f"between {start_date} and {end_date}"
         )
+
+    if data_source == "mootdx (TCP)":
+        df, supplemented = _supplement_kline_from_sina(
+            df, code, start_date, end_date
+        )
+        if supplemented:
+            data_source = "mootdx+sina HTTP"
 
     for col in ["Open", "High", "Low", "Close"]:
         if col in df.columns:
@@ -617,8 +692,7 @@ def get_fundamentals(
 
         # --- mootdx: financial snapshot (quarterly) ---
         try:
-            client = _get_mootdx_client()
-            fin = client.finance(symbol=code)
+            fin = _call_mootdx(lambda client: client.finance(symbol=code))
             if fin is not None and not (
                 isinstance(fin, pd.DataFrame) and fin.empty
             ):
@@ -734,7 +808,7 @@ def get_fundamentals(
                                 else:
                                     lines.append(
                                         f"EPS declining ({cagr * 100:.0f}%), "
-                                        f"PEG not applicable"
+                                        "PEG not applicable"
                                     )
                 except Exception as e:
                     logger.warning("Forward PE calc failed for %s: %s", code, e)
@@ -761,6 +835,91 @@ def get_fundamentals(
 def _sina_stock_code(code: str) -> str:
     """Pure 6-digit code → sina format (sh688017 / sz000001 / bj832000)."""
     return f"{_get_prefix(code)}{code}"
+
+
+def _sina_finance_report_list_to_dataframe(payload: dict) -> pd.DataFrame:
+    """Parse Sina getFinanceReport2022 report_list payload into a flat DataFrame."""
+    report_list = payload.get("report_list") or {}
+    rows: list[dict] = []
+    for period_key, entry in report_list.items():
+        ann_date, ann_source = _resolve_sina_announcement_date(
+            str(period_key),
+            entry.get("publish_date"),
+        )
+        row: dict = {
+            "报告日": str(period_key),
+            "公告日期": ann_date,
+            "announcement_date_source": ann_source,
+        }
+        for item in entry.get("data") or []:
+            title = item.get("item_title")
+            field = item.get("item_field")
+            value = item.get("item_value")
+            if title:
+                row[str(title)] = value
+            if field:
+                row[str(field)] = value
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _report_period_end_date(period_key: str) -> date | None:
+    text = str(period_key).strip()
+    if len(text) >= 8 and text[:8].isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return None
+
+
+def _parse_sina_publish_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "-" in text:
+        return date.fromisoformat(text[:10])
+    if len(text) >= 8 and text[:8].isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return None
+
+
+def _regulatory_announcement_deadline(period_end: date) -> date:
+    """A-share latest disclosure deadlines (used when Sina publish_date is implausible)."""
+    if period_end.month == 3:
+        return date(period_end.year, 4, 30)
+    if period_end.month == 6:
+        return date(period_end.year, 8, 31)
+    if period_end.month == 9:
+        return date(period_end.year, 10, 31)
+    if period_end.month == 12:
+        return date(period_end.year + 1, 4, 30)
+    return period_end
+
+
+def _max_announcement_lag_days(period_end: date) -> int:
+    if period_end.month == 12:
+        return 120
+    if period_end.month == 6:
+        return 65
+    return 40
+
+
+def _resolve_sina_announcement_date(
+    period_key: str,
+    publish_date_raw: Any,
+) -> tuple[str | None, str]:
+    """Reject Sina comparison-column publish_date; fall back to regulatory deadline."""
+    period_end = _report_period_end_date(period_key)
+    if period_end is None:
+        return None, "regulatory_deadline"
+    publish = _parse_sina_publish_date(publish_date_raw)
+    if publish is not None and publish > period_end:
+        lag_days = (publish - period_end).days
+        if lag_days <= _max_announcement_lag_days(period_end):
+            return publish.isoformat(), "reported"
+    return _regulatory_announcement_deadline(period_end).isoformat(), "regulatory_deadline"
 
 
 def _get_financial_report_sina(
@@ -790,16 +949,18 @@ def _get_financial_report_sina(
     r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
     d = r.json()
 
-    result = d.get("result", {}).get("data", {})
-    items = result.get(source_type, [])
-    if not isinstance(items, list) or not items:
+    payload = (d.get("result") or {}).get("data") or {}
+    items = payload.get(source_type, [])
+    if isinstance(items, list) and items:
+        df = pd.DataFrame(items)
+    elif payload.get("report_list"):
+        df = _sina_finance_report_list_to_dataframe(payload)
+    else:
         return pd.DataFrame()
-
-    df = pd.DataFrame(items)
 
     # Filter by curr_date
     if curr_date and "报告日" in df.columns:
-        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
+        df["报告日"] = pd.to_datetime(df["报告日"].astype(str), errors="coerce")
         cutoff = pd.to_datetime(curr_date)
         df = df[df["报告日"] <= cutoff]
 
@@ -1173,8 +1334,7 @@ def get_insider_transactions(
     code = _normalize_ticker(ticker)
 
     try:
-        client = _get_mootdx_client()
-        text = client.F10(symbol=code, name="股东研究")
+        text = _call_mootdx(lambda client: client.F10(symbol=code, name="股东研究"))
 
         if not text or not text.strip():
             return f"No insider/shareholder data found for A-stock '{code}'"
@@ -1226,7 +1386,7 @@ def get_profit_forecast(
 
         lines = [
             f"# Consensus EPS Forecast for {code} (A-stock)",
-            f"# Source: 同花顺 analyst consensus (direct HTTP)",
+            "# Source: 同花顺 analyst consensus (direct HTTP)",
             f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
         ]
@@ -1290,7 +1450,7 @@ def get_profit_forecast(
                         else:
                             lines.append(
                                 f"EPS declining ({cagr * 100:.0f}%), "
-                                f"PEG not applicable"
+                                "PEG not applicable"
                             )
         except Exception as e:
             logger.warning("Forward PE calc failed for %s: %s", code, e)
@@ -1319,7 +1479,7 @@ def get_hot_stocks(
 
     try:
         url = (
-            f"http://zx.10jqka.com.cn/event/api/getharden/"
+            "http://zx.10jqka.com.cn/event/api/getharden/"
             f"date/{curr_date}/orderby/date/orderway/desc/charset/GBK/"
         )
         headers = {
@@ -1338,12 +1498,12 @@ def get_hot_stocks(
         if not rows:
             return (
                 f"No hot stocks data for {curr_date} "
-                f"(may be non-trading day or data not yet available)"
+                "(may be non-trading day or data not yet available)"
             )
 
         lines = [
             f"# Hot Stocks with Topic Attribution ({curr_date})",
-            f"# Source: 同花顺 editorial (human-curated reason tags)",
+            "# Source: 同花顺 editorial (human-curated reason tags)",
             f"# Total: {len(rows)} stocks",
             "",
         ]
@@ -1373,7 +1533,7 @@ def get_hot_stocks(
 
         if all_tags:
             cnt = Counter(all_tags)
-            lines.append(f"\n## Theme Frequency (top 15)")
+            lines.append("\n## Theme Frequency (top 15)")
             for tag, n in cnt.most_common(15):
                 lines.append(f"  {tag}: {n} stocks")
 
@@ -1595,7 +1755,7 @@ def get_concept_blocks(
 
         lines = [
             f"# Concept & Sector Blocks for {code} (A-stock)",
-            f"# Source: 百度股市通 (Baidu PAE)",
+            "# Source: 百度股市通 (Baidu PAE)",
             f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
         ]
@@ -1648,7 +1808,7 @@ def get_fund_flow(
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
     lines = [
         f"# Fund Flow for {code} (A-stock)",
-        f"# Source: 东财 push2 (Eastmoney)",
+        "# Source: 东财 push2 (Eastmoney)",
         f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
     ]

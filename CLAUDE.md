@@ -38,6 +38,14 @@
 
 ## 已知问题与注意事项
 
+### 选股与市场数据（阶段 4）
+
+- **默认 Provider**：`FreeAStockProvider`（mootdx + 公开 HTTP，封装 `a_stock.py` 能力）
+- **可选增强**：`TushareProvider`（`pip install -e ".[screener-tushare]"` + `TUSHARE_TOKEN` + `TRADINGAGENTS_MARKET_DATA_PROVIDER=tushare`）
+- **配置优先级**：CLI `--provider` → `TRADINGAGENTS_MARKET_DATA_PROVIDER` → YAML `market_data.provider` → 默认 `free`
+- **能力矩阵**：`docs/data/data-capability-matrix.yaml`（免费行业/概念/指数为 `CURRENT_ONLY`；正式历史回测须 PIT 复权与证券快照）
+- **设计文档**：`docs/superpowers/specs/2026-06-19-real-data-and-universe-screening-design.md` §20
+
 ### 依赖冲突（v0.2.6 已缓解）
 mootdx 锁死 httpx==0.25.2，与 langchain-google-genai 的 httpx>=0.28.1 冲突。v0.2.6 将 google-genai 移至可选依赖 `[google]`，`pip install -e .` 不再冲突。需要 Google 模型时 `pip install -e ".[google]"`。
 

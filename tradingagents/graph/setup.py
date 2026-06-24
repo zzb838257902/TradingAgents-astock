@@ -116,7 +116,9 @@ class GraphSetup:
         # Create workflow
         workflow = StateGraph(AgentState)
 
-        # Add analyst nodes to the graph
+        # Add analyst nodes to the graph.
+        # Node names use analyst_type.capitalize() + " Analyst" (not title()).
+        # hot_money -> "Hot_money Analyst"; must match cli.analyst_registry graph_node_name.
         for analyst_type, node in analyst_nodes.items():
             workflow.add_node(f"{analyst_type.capitalize()} Analyst", node)
             workflow.add_node(

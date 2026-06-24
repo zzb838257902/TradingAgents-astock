@@ -1,21 +1,15 @@
 import questionary
-from typing import List, Optional, Tuple, Dict
+from typing import List, Tuple
 
 from rich.console import Console
 
 from cli.models import AnalystType
+from cli.analyst_registry import ANALYST_CHOICES
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
 
 TICKER_INPUT_EXAMPLES = "Examples: SPY, CNC.TO, 7203.T, 0700.HK"
-
-ANALYST_ORDER = [
-    ("Market Analyst", AnalystType.MARKET),
-    ("Social Media Analyst", AnalystType.SOCIAL),
-    ("News Analyst", AnalystType.NEWS),
-    ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
-]
 
 
 def get_ticker() -> str:
@@ -91,7 +85,7 @@ def select_analysts() -> List[AnalystType]:
     choices = questionary.checkbox(
         "Select Your [Analysts Team]:",
         choices=[
-            questionary.Choice(display, value=value) for display, value in ANALYST_ORDER
+            questionary.Choice(display, value=value) for display, value in ANALYST_CHOICES
         ],
         instruction="\n- Press Space to select/unselect analysts\n- Press 'a' to select/unselect all\n- Press Enter when done",
         validate=lambda x: len(x) > 0 or "You must select at least one analyst.",

@@ -1,0 +1,347 @@
+# TradingAgents-Astock data capability matrix
+# Baseline: auto-stock-screening-design (free default, paid optional)
+# Revised: 2026-06-19 — corrects phase-4 Tushare-as-default drift
+#
+# PIT levels:
+#   pit_required   — verified publication time + history; formal backtest allowed
+#   current_only   — live screening only; historical as_of → data_error
+#   best_effort    — exploratory reports only; NOT formal backtest acceptance
+#
+# Provider selection (no silent fallback):
+#   TRADINGAGENTS_MARKET_DATA_PROVIDER=free|tushare|fixture
+#   Priority: CLI --provider → env → YAML market_data.provider → default free
+
+version: 2
+default_provider: free
+
+providers:
+  free:
+    module: tradingagents.market_data.providers.free_astock
+    requires_token: false
+    description: mootdx + exchange/public HTTP (reuses dataflows/a_stock.py patterns)
+  tushare:
+    module: tradingagents.market_data.providers.tushare
+    optional_extra: screener-tushare
+    requires_token: true
+    env_token: TUSHARE_TOKEN
+    description: optional paid enhancement; explicit selection only
+  fixture:
+    module: tradingagents.market_data.providers.fixture
+    requires_token: false
+    description: offline tests, CI, explicit --fixture runs
+
+datasets:
+  trade_calendar:
+    free_source: eastmoney+exchange-derived
+    paid_source: tushare.trade_cal
+    history_start: configurable_backfill
+    update_frequency: daily
+    available_at: source_publication_time
+    pit_level: pit_required
+    license: public_metadata
+    stability: high
+    degradation: derived-weekend-fallback-must-log-warning
+
+  security_master:
+    free_source: mootdx+eastmoney
+    paid_source: tushare.stock_basic
+    history_start: list_date_per_symbol
+    update_frequency: daily
+    available_at: listing_event_or_daily_snapshot_time
+    pit_level: pit_required
+    license: public_metadata
+    stability: medium
+  # Historical delist boundary rules (mandatory):
+  # - Live screening: allowed with same-day effective pool
+  # - Exploratory history: best_effort only when snapshot coverage incomplete
+  # - Formal historical backtest: data_error if reliable historical security snapshot missing
+  # - FORBIDDEN: infer historical pool from current list; expose future delist before known
+    degradation:
+      live_screening: same_day_effective_pool
+      exploratory_report: best_effort_with_banner
+      formal_backtest: data_error_without_daily_snapshot_archive
+      accumulation: daily_snapshot_or_authoritative_history
+
+  daily_bars:
+    free_source: mootdx+sina-fallback
+    paid_source: tushare.daily
+    history_start: mootdx_offset_per_symbol
+    update_frequency: daily
+    available_at: conservative_post_close_or_ingestion_time
+    pit_level: pit_required
+    license: public_quotes
+    stability: medium
+    degradation: sina-fallback; sync_blocked_on_failure
+
+  adjustment_factors:
+    source: mootdx.xdxr
+    free_source: mootdx.xdxr
+    paid_source: tushare.adj_factor
+    history_start: provider-dependent
+    update_frequency: daily
+    available_at: factor_publication_time
+    pit_level: pit_required
+    license: public_or_vendor
+    stability: medium
+  # Formal V1 acceptance BLOCKED until reliable free adjustment factors OR
+  # verifiable corporate-actions-derived PIT adjusted series exists.
+  # Experimental mode only:
+    experimental:
+      price_basis: raw
+      pit_level: best_effort
+      banner: not_for_formal_performance_evaluation
+      excluded_from_phase_acceptance: true
+    degradation:
+      formal_momentum_backtest: blocked_until_pit_adjusted_series
+      execution_limits: always_unadjusted_real_prices
+
+  corporate_actions:
+    free_source: exchange-disclosure+sina-statements
+    paid_source: tushare.dividend+share_float
+    history_start: disclosure_date
+    update_frequency: event-driven
+    available_at: disclosure_time
+    pit_level: pit_required
+    license: public_disclosure
+    stability: medium
+    degradation: required_for_adjusted_price_construction
+
+  financials:
+    free_source: mootdx+sina-statements
+    paid_source: tushare.fina_indicator
+    history_start: announcement_date
+    update_frequency: quarterly+daily_sync
+    available_at: announcement_or_next_open_conservative
+    pit_level: pit_required
+    license: public_disclosure
+    stability: medium
+  # PIT_REQUIRED only when announcement_date (or actual_announcement_time) is reliable.
+  # Records WITHOUT reliable announcement_date MUST NOT enter historical strategy.
+    admission_rule: announcement_date_required_for_pit_required
+    degradation:
+      missing_announcement_date: reject_record_or_best_effort_exploratory_only
+      formal_backtest: data_error_if_strategy_needs_missing_financials
+
+  industry_members:
+    free_source: eastmoney-current-snapshot
+    paid_source: tushare.index_member_all
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: any_source_passing_contract_and_pit_audit
+
+  concept_members:
+    free_source: eastmoney+baidu-current-snapshot
+    paid_source: tushare.dc_member
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: low-medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: dated_snapshot_or_effective_interval_after_audit
+
+  index_members:
+    free_source: eastmoney-current-snapshot
+    paid_source: tushare.index_weight
+    history_start: current_snapshot_only_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: current_only
+    license: public_pages
+    stability: medium
+    degradation:
+      live_screening: allowed
+      historical_universe: data_error
+      upgrade_to_pit_required: any_source_passing_contract_and_pit_audit
+
+  daily_indicators:
+    free_source: tencent+eastmoney
+    paid_source: tushare.daily_basic
+    history_start: limited_on_free
+    update_frequency: daily
+    available_at: ingestion_time
+    pit_level: best_effort
+    license: public_quotes
+    stability: medium
+    degradation: not_required_for_phase4_core_acceptance
+
+  fund_flow:
+    free_source: eastmoney-push2
+    history_start: limited_recent_history
+    update_frequency: intraday
+    available_at: ingestion_time
+    pit_level: best_effort
+    license: public_pages
+    stability: medium
+    degradation: agent_research_only
+
+acceptance_tiers:
+  free_default_path:
+    requires_token: false
+    must_pass:
+      - init_without_token
+      - probe_without_tushare
+      - sync_security_calendar_daily
+      - after_close_scheduler
+      - fixture_regression
+      - live_screening_all_and_custom
+      - current_only_board_live_screening
+    formal_backtest_requires:
+      - security_master_historical_snapshot_coverage_for_as_of
+      - pit_adjusted_price_series
+      - financials_with_announcement_date
+  paid_enhancement_path:
+    requires:
+      - pip_extra_screener_tushare
+      - TRADINGAGENTS_MARKET_DATA_PROVIDER=tushare
+      - TUSHARE_TOKEN
+    no_auto_fallback_to_free: true
+    optional_pass:
+      - pit_industry_concept_index_members
+      - extended_history_backfill
+
+# Phase 5 event enrichment datasets (frozen by Task 1 probe on 2026-06-20)
+event_datasets:
+  official_announcements:
+    pit_level: pit_required
+    probe_status: PASS
+    markets: [sse_main, szse_main, chinext, star]
+    forbidden_substitutes:
+      - eastmoney.search.cmsArticleWebOld
+      - sina.corp.vCB_AllNewsStock
+      - tushare.anns
+    primary_source:
+      id: sina.corp.vCB_AllBulletin
+      platform: 新浪财经 VIP 公告列表
+      endpoint: https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletin.php
+      requires_token: false
+      auth: none
+      license: public_disclosure_metadata_only
+      pagination: Page query param (30 rows/page)
+      history_range: per_symbol paginated backfill
+      rate_limit: shared_http_conservative_1rps_no_em_throttle
+      time_precision: date_only_conservative_next_open
+      empty_semantics: SUCCESS_EMPTY only when HTML table has zero rows
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: 8f88cbc9857c92d4a3b2c1d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3
+      failover_condition: use backup_source when primary HTTP/PARSE fails
+    backup_source:
+      id: sina.CompanyFinanceService.getFinanceReport2022
+      platform: 新浪财经财报披露 report_list
+      endpoint: https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022
+      requires_token: false
+      license: public_disclosure
+      pagination: num param per statement type
+      history_range: recent periods per symbol
+      rate_limit: shared_http_conservative
+      time_precision: date_with_regulatory_deadline_fallback
+      empty_semantics: SUCCESS_EMPTY when report_list empty
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: edae3a9af333dc0e1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70
+      failover_condition: periodic_financial_disclosures_only_not_general_bulletins
+    optional_enhancement:
+      id: eastmoney.datacenter.disclosure
+      platform: 东方财富 datacenter
+      requires_token: false
+      blocks_core_on_failure: false
+      note: optional metadata enrichment only; never substitutes primary bulletin feed
+
+  event_news:
+    pit_level: best_effort
+    probe_status: PASS
+    primary_source:
+      id: eastmoney.search.cmsArticleWebOld
+      platform: 东方财富 search-api-web
+      endpoint: https://search-api-web.eastmoney.com/search/jsonp
+      requires_token: false
+      auth: none
+      license: headline_and_url_metadata_only_no_fulltext_redistribution
+      pagination: pageIndex/pageSize JSON param
+      history_range: recent articles per symbol keyword
+      rate_limit: eastmoney_em_get_throttled
+      time_precision: best_effort_article_timestamp
+      empty_semantics: SUCCESS_EMPTY when result list empty
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcd
+      failover_condition: sina.corp.vCB_AllNewsStock on primary failure
+    backup_source:
+      id: sina.corp.vCB_AllNewsStock
+      platform: 新浪财经个股新闻 HTML
+      endpoint: https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllNewsStock.php
+      requires_token: false
+      license: headline_and_url_metadata_only
+      pagination: Page param
+      history_range: recent headlines per symbol
+      rate_limit: shared_http_conservative
+      time_precision: best_effort_datetime_in_html
+      empty_semantics: SUCCESS_EMPTY when regex finds zero rows
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcde
+      failover_condition: none
+
+  event_fund_flow:
+    pit_level: best_effort
+    probe_status: PASS
+    primary_source:
+      id: eastmoney.push2.fund_flow
+      platform: 东财 push2 / push2his
+      endpoint: https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get
+      requires_token: false
+      auth: none
+      license: public_pages_research_only
+      pagination: secid + lmt days
+      history_range: ~20 trading days on free path
+      rate_limit: eastmoney_em_get_throttled
+      time_precision: ingestion_time_best_effort
+      empty_semantics: SUCCESS_EMPTY when kline nodes absent
+      error_types: [NETWORK_ERROR, RATE_LIMITED, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0
+      failover_condition: none_for_phase5_core
+
+  event_hot_topics:
+    pit_level: current_only
+    probe_status: PASS
+    primary_source:
+      id: ths.10jqka.getharden
+      platform: 同花顺涨停题材
+      endpoint: http://zx.10jqka.com.cn/event/api/getharden/date/{date}/...
+      requires_token: false
+      auth: none
+      license: public_pages_current_snapshot_only
+      pagination: single day feed
+      history_range: current_trading_day_only
+      rate_limit: shared_http_conservative
+      time_precision: trade_date_snapshot
+      empty_semantics: SUCCESS_EMPTY on non_trading_day_or_no_rows
+      error_types: [NETWORK_ERROR, PARSE_ERROR, HTTP_ERROR]
+      sample_response_sha256: d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0123
+      failover_condition: none
+
+event_probe:
+  probed_at: "2026-06-20"
+  free_path_requires_token: false
+  core_announcement_gate: PASS
+  boards_probed:
+    sse_main: {symbol: "600000", bulletin_sha16: "8f88cbc9857c92d4", report_list_sha16: "edae3a9af333dc0e"}
+    szse_main: {symbol: "000001", bulletin_sha16: "4410cd78ade3fcb0", report_list_sha16: "169102868b28bda6"}
+    chinext: {symbol: "300001", bulletin_sha16: "f4dd635fae7edb38", report_list_sha16: "047caa45f9702dba"}
+    star: {symbol: "688001", bulletin_sha16: "0deee66cceb80a3a", report_list_sha16: "9887027e7369905c"}
+  scenarios_documented:
+    - with_announcements
+    - no_announcements
+    - revised_announcement
+    - pagination
+    - rate_limited
+    - network_error
+  blocked_if_core_fails: true
+  news_cannot_substitute_announcements: true

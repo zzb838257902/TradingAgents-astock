@@ -1,0 +1,12 @@
+{
+  "source_id": "sina.corp.vCB_AllBulletin",
+  "symbol": "000001",
+  "board": "szse_main",
+  "scenario": "with_announcements",
+  "desensitized": true,
+  "full_text_saved": false,
+  "response_sha256": "4410cd78ade3fcb0a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
+  "fields_present": ["date", "title", "source_record_id", "url"],
+  "time_precision": "date_only",
+  "row_count": 30
+}

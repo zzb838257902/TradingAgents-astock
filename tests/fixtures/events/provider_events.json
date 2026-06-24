@@ -1,0 +1,289 @@
+{
+  "version": 1,
+  "event_datasets": {
+    "announcements": {
+      "dataset": "official_announcements",
+      "endpoint": "sina.corp.vCB_AllBulletin",
+      "pit_level": "pit_required"
+    },
+    "news": {
+      "dataset": "event_news",
+      "endpoint": "eastmoney.np-weblist",
+      "pit_level": "best_effort"
+    },
+    "fund_flow": {
+      "dataset": "event_fund_flow",
+      "endpoint": "eastmoney.push2",
+      "pit_level": "best_effort"
+    },
+    "hot_topics": {
+      "dataset": "event_hot_topics",
+      "endpoint": "10jqka.hot",
+      "pit_level": "current_only"
+    }
+  },
+  "events": [
+    {
+      "dataset": "announcements",
+      "symbols": ["600000"],
+      "event": {
+        "event_id": "evt-pos",
+        "event_type": "financial_report",
+        "title": "Positive annual report",
+        "summary": "profit up",
+        "published_at": "2026-05-01T16:00:00+08:00",
+        "available_at": "2026-05-06T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/pos",
+        "source_record_id": "ann-pos",
+        "source_version": "v1",
+        "content_hash": "hash-pos",
+        "pit_level": "pit_required",
+        "sentiment": "positive",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600001"],
+      "event": {
+        "event_id": "evt-neg",
+        "event_type": "penalty",
+        "title": "Regulatory penalty",
+        "summary": "fine issued",
+        "published_at": "2026-05-02T16:00:00+08:00",
+        "available_at": "2026-05-07T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/neg",
+        "source_record_id": "ann-neg",
+        "source_version": "v1",
+        "content_hash": "hash-neg",
+        "pit_level": "pit_required",
+        "sentiment": "negative",
+        "severity": "high",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600002"],
+      "event": {
+        "event_id": "evt-neu",
+        "event_type": "management_change",
+        "title": "Board appointment",
+        "summary": "neutral change",
+        "published_at": "2026-05-03T16:00:00+08:00",
+        "available_at": "2026-05-08T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/neu",
+        "source_record_id": "ann-neu",
+        "source_version": "v1",
+        "content_hash": "hash-neu",
+        "pit_level": "pit_required",
+        "sentiment": "neutral",
+        "severity": "low",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600000"],
+      "event": {
+        "event_id": "evt-dup-a",
+        "event_type": "financial_report",
+        "title": "Duplicate stable key A",
+        "summary": "dup",
+        "published_at": "2026-05-04T16:00:00+08:00",
+        "available_at": "2026-05-09T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/dup-a",
+        "source_record_id": "dup-key",
+        "source_version": "v1",
+        "content_hash": "hash-dup-a",
+        "pit_level": "pit_required",
+        "sentiment": "neutral",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600000"],
+      "event": {
+        "event_id": "evt-dup-b",
+        "event_type": "financial_report",
+        "title": "Duplicate stable key B",
+        "summary": "dup",
+        "published_at": "2026-05-04T17:00:00+08:00",
+        "available_at": "2026-05-09T10:00:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/dup-b",
+        "source_record_id": "dup-key",
+        "source_version": "v1",
+        "content_hash": "hash-dup-b",
+        "pit_level": "pit_required",
+        "sentiment": "neutral",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600003"],
+      "event": {
+        "event_id": "evt-old",
+        "event_type": "financial_report",
+        "title": "Original bulletin",
+        "summary": "rev1",
+        "published_at": "2026-04-20T16:00:00+08:00",
+        "available_at": "2026-04-25T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/old",
+        "source_record_id": "rev-1",
+        "source_version": "v1",
+        "content_hash": "hash-old",
+        "pit_level": "pit_required",
+        "sentiment": "neutral",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600003"],
+      "event": {
+        "event_id": "evt-new",
+        "event_type": "financial_report",
+        "title": "Revised bulletin",
+        "summary": "rev2",
+        "published_at": "2026-04-21T16:00:00+08:00",
+        "available_at": "2026-04-26T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/new",
+        "source_record_id": "rev-1",
+        "source_version": "v2",
+        "content_hash": "hash-new",
+        "pit_level": "pit_required",
+        "sentiment": "positive",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid",
+        "supersedes_event_id": "evt-old"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600004"],
+      "event": {
+        "event_id": "evt-future",
+        "event_type": "earnings_forecast",
+        "title": "Future forecast",
+        "summary": "future",
+        "published_at": "2026-08-01T16:00:00+08:00",
+        "available_at": "2026-08-06T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/future",
+        "source_record_id": "ann-future",
+        "source_version": "v1",
+        "content_hash": "hash-future",
+        "pit_level": "pit_required",
+        "sentiment": "positive",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "announcements",
+      "symbols": ["600005", "600006"],
+      "event": {
+        "event_id": "evt-multi",
+        "event_type": "major_contract",
+        "title": "Joint contract",
+        "summary": "multi symbol",
+        "published_at": "2026-05-10T16:00:00+08:00",
+        "available_at": "2026-05-15T09:30:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/multi",
+        "source_record_id": "ann-multi",
+        "source_version": "v1",
+        "content_hash": "hash-multi",
+        "pit_level": "pit_required",
+        "sentiment": "positive",
+        "severity": "medium",
+        "announcement_date_source": "reported",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "news",
+      "symbols": ["600000"],
+      "event": {
+        "event_id": "evt-news",
+        "event_type": "news",
+        "title": "Sector headline",
+        "summary": "news item",
+        "published_at": "2026-05-11T10:00:00+08:00",
+        "available_at": "2026-05-11T10:05:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/news",
+        "source_record_id": "news-1",
+        "source_version": "v1",
+        "content_hash": "hash-news",
+        "pit_level": "best_effort",
+        "sentiment": "neutral",
+        "severity": "low",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "fund_flow",
+      "symbols": ["600000"],
+      "event": {
+        "event_id": "evt-flow",
+        "event_type": "fund_flow",
+        "title": "Main force inflow",
+        "summary": "flow",
+        "published_at": "2026-05-12T15:00:00+08:00",
+        "available_at": "2026-05-12T15:05:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/flow",
+        "source_record_id": "flow-1",
+        "source_version": "v1",
+        "content_hash": "hash-flow",
+        "pit_level": "best_effort",
+        "sentiment": "positive",
+        "severity": "low",
+        "quality_status": "valid"
+      }
+    },
+    {
+      "dataset": "hot_topics",
+      "symbols": [],
+      "event": {
+        "event_id": "evt-hot",
+        "event_type": "hot_topic",
+        "title": "AI theme heat",
+        "summary": "hot",
+        "published_at": "2026-06-20T09:30:00+08:00",
+        "available_at": "2026-06-20T09:35:00+08:00",
+        "source": "fixture",
+        "source_url": "https://example.com/hot",
+        "source_record_id": "hot-1",
+        "source_version": "v1",
+        "content_hash": "hash-hot",
+        "pit_level": "current_only",
+        "sentiment": "positive",
+        "severity": "low",
+        "quality_status": "valid"
+      }
+    }
+  ]
+}

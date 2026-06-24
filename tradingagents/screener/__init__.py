@@ -1,0 +1,1 @@
+"""Automatic stock screening MVP."""

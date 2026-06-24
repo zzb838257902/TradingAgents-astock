@@ -1,0 +1,15 @@
+{
+  "source_id": "sina.corp.vCB_AllBulletin",
+  "symbol": "999998",
+  "board": "synthetic",
+  "scenario": "no_announcements",
+  "layout": "empty_table_message",
+  "desensitized": true,
+  "full_text_saved": false,
+  "fixture_path": "tests/fixtures/events/sina_bulletin_empty_sample.html",
+  "response_sha256": "c9d8a7cfc76348a076cb71a0ed378a30f4339e81651053ef53131412f5699bd1",
+  "empty_message": "暂时没有数据",
+  "fields_present": [],
+  "empty_semantics": "SUCCESS_EMPTY",
+  "row_count": 0
+}

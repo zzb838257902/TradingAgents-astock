@@ -47,10 +47,29 @@ Upstream = "https://github.com/TauricResearch/TradingAgents"
 
 [project.optional-dependencies]
 google = ["langchain-google-genai>=4.0.0"]
+screener = [
+    "duckdb>=1.3,<2",
+    "PyYAML>=6.0,<7",
+]
+screener-tushare = [
+    "tushare>=1.4,<2",
+]
+screener-arrow = [
+    "pyarrow>=19,<22",
+]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<8",
+    "ruff>=0.11,<1",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
 tradingagents-web = "web.launch:main"
+tradingagents-screen = "tradingagents.screener.cli:app"
+tradingagents-market-data = "tradingagents.market_data.cli:app"
+tradingagents-scheduler = "tradingagents.scheduler.cli:app"
+tradingagents-paper = "tradingagents.paper.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*", "web*"]

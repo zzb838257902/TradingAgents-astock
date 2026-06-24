@@ -1,0 +1,1063 @@
+"""Synchronize provider data into the live DuckDB repository."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from enum import StrEnum
+from typing import Any
+
+from tradingagents.market_data.config import MarketDataPaths
+from tradingagents.market_data.contracts import DataResult, DataStatus
+from tradingagents.market_data.market_hours import SHANGHAI, ensure_aware_shanghai, post_close_signal_time
+from tradingagents.market_data.providers.base import MarketDataProvider
+from tradingagents.market_data.quality import (
+    CoverageReport,
+    assess_daily_bar_quality,
+    assess_daily_indicator_quality,
+    assess_market_open_snapshot_quality,
+    build_backfill_completeness_report,
+    build_daily_completeness_report,
+    build_daily_indicator_completeness_report,
+    build_financial_field_quality_report,
+    build_financial_symbol_coverage_report,
+    build_security_coverage_report,
+    build_trade_calendar_range_report,
+    DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+)
+from tradingagents.market_data.financials import normalize_financial_row
+from tradingagents.market_data.repository import MarketDataRepository
+from tradingagents.market_data.sync_policy import live_snapshot_date_error, security_snapshot_write_error
+
+DAILY_COMPLETENESS_THRESHOLD = 0.995
+BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD = 1.0
+FINANCIAL_SYMBOL_COVERAGE_THRESHOLD = 0.0
+FINANCIAL_FIELD_QUALITY_THRESHOLD = 0.99
+SECURITY_COVERAGE_THRESHOLD = 0.99
+
+
+def _trade_calendar_range_error(
+    range_report: CoverageReport,
+    start: date,
+    end: date,
+) -> str:
+    details = range_report.details[0] if range_report.details else {}
+    effective_end = details.get("effective_end", end.isoformat())
+    actual_start = details.get("actual_start")
+    actual_end = details.get("actual_end")
+    source_label = details.get("source_label")
+    source_limit_bars = details.get("source_limit_bars")
+    limit_note = ""
+    if source_label or source_limit_bars:
+        label = source_label or "provider"
+        if source_limit_bars:
+            limit_note = f" ({label} limited to ~{source_limit_bars} bars)"
+        else:
+            limit_note = f" ({label})"
+    if actual_start is None and actual_end is None:
+        return (
+            "trade calendar source returned no open days for "
+            f"{start.isoformat()}..{end.isoformat()}{limit_note}"
+        )
+    parts: list[str] = []
+    if details.get("covers_start") is False:
+        effective_start = details.get("effective_start", start.isoformat())
+        parts.append(
+            "start gap: expected from "
+            f"{effective_start}, actual from {actual_start}"
+        )
+    if details.get("covers_end") is False:
+        parts.append(
+            "end gap: expected through "
+            f"{effective_end}, actual through {actual_end}"
+        )
+    if not parts:
+        parts.append(f"requested {start.isoformat()}..{end.isoformat()}")
+    return (
+        "trade calendar source does not cover requested range: "
+        + "; ".join(parts)
+        + limit_note
+    )
+
+
+class SyncStatus(StrEnum):
+    PUBLISHED = "published"
+    ERROR = "error"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    dataset: str
+    status: SyncStatus
+    run_id: str | None = None
+    version_id: str | None = None
+    content_hash: str | None = None
+    errors: list[str] = field(default_factory=list)
+    coverage_reports: dict[str, CoverageReport] = field(default_factory=dict)
+
+
+class MarketDataSync:
+    def __init__(
+        self,
+        repository: MarketDataRepository,
+        provider: MarketDataProvider,
+        paths: MarketDataPaths,
+    ):
+        self.repository = repository
+        self.provider = provider
+        self.paths = paths
+
+    def _requires_live_snapshot_date(self) -> bool:
+        return getattr(self.provider, "name", "") == "free_astock"
+
+    def _trade_calendar_probe_limits(self) -> tuple[int | None, str | None]:
+        probe = self.repository.get_capability_probe()
+        if probe is None:
+            auto = self.probe_capabilities()
+            if auto.status != SyncStatus.PUBLISHED:
+                return None, getattr(self.provider, "name", None)
+            probe = self.repository.get_capability_probe()
+        if not probe:
+            return None, getattr(self.provider, "name", None)
+        entry = probe.get("trade_calendar") or {}
+        max_rows = entry.get("max_rows_per_call")
+        label = entry.get("endpoint") or entry.get("license_note") or self.provider.name
+        return max_rows, label
+
+    def probe_capabilities(self) -> SyncResult:
+        result = self.provider.probe_capabilities()
+        payload = {
+            item.dataset: item.model_dump(mode="json")
+            for item in (result.data or [])
+        }
+        if payload:
+            self.repository.save_sync_state("capability_probe", payload)
+        if result.status in {DataStatus.OK, DataStatus.PARTIAL}:
+            return SyncResult(
+                dataset="capability_probe",
+                status=SyncStatus.PUBLISHED,
+                errors=result.errors,
+            )
+        return SyncResult(
+            dataset="capability_probe",
+            status=SyncStatus.ERROR,
+            errors=result.errors or [result.status.value],
+        )
+
+    def sync_security_master(
+        self, as_of: date, *, symbols: list[str] | None = None
+    ) -> SyncResult:
+        probe = self._require_probe_dataset("security_master")
+        if probe is not None:
+            return probe
+        run_time = datetime.now(tz=SHANGHAI)
+        if self._requires_live_snapshot_date():
+            date_error = live_snapshot_date_error(as_of, dataset="security_master")
+            if date_error:
+                return SyncResult(
+                    dataset="security_master",
+                    status=SyncStatus.BLOCKED,
+                    errors=[date_error],
+                )
+            snapshot_error = security_snapshot_write_error(as_of, run_time)
+            if snapshot_error:
+                return SyncResult(
+                    dataset="security_master",
+                    status=SyncStatus.BLOCKED,
+                    errors=[snapshot_error],
+                )
+        fetched = self.provider.list_securities(as_of)
+        if not fetched.is_usable_for_screening:
+            return self._error_result("security_master", fetched)
+        records = fetched.data or []
+        if symbols:
+            wanted = set(symbols)
+            records = [record for record in records if record.symbol in wanted]
+        run_id = self.repository.begin_ingestion_run(
+            "security_master",
+            {"as_of": as_of.isoformat(), "symbols": symbols},
+        )
+        self.repository.upsert_staging_securities(run_id, records)
+        self._save_snapshot("stock_basic", {"as_of": as_of.isoformat()}, records)
+        count_target = getattr(self.provider, "count_listed_securities_target", None)
+        if symbols:
+            denominator = len(symbols)
+        elif count_target is not None:
+            denominator = count_target(as_of)
+        else:
+            denominator = len(records)
+        report = build_security_coverage_report(
+            numerator=len(records),
+            denominator=denominator,
+            threshold=1.0 if symbols else SECURITY_COVERAGE_THRESHOLD,
+        )
+        if report.status != "pass":
+            self.repository.mark_ingestion_failed(
+                run_id,
+                f"security coverage {report.ratio:.4f} < {report.threshold}",
+            )
+            self.repository.record_quality_event(
+                dataset="security_master",
+                rule="security_coverage",
+                severity="blocking",
+                numerator=report.numerator,
+                denominator=report.denominator,
+                detail_json=report.to_dict(),
+            )
+            return SyncResult(
+                dataset="security_master",
+                status=SyncStatus.BLOCKED,
+                run_id=run_id,
+                errors=[f"security coverage below threshold: {report.ratio:.4f}"],
+                coverage_reports={"security_coverage": report},
+            )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("security_master")
+        self.repository.upsert_security_master_snapshot(as_of, records)
+        return SyncResult(
+            dataset="security_master",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"security_coverage": report},
+        )
+
+    def sync_trade_calendar(self, start: date, end: date) -> SyncResult:
+        probe = self._require_probe_dataset("trade_calendar")
+        if probe is not None:
+            return probe
+        fetched = self.provider.get_trade_calendar(start, end)
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result("trade_calendar", fetched)
+        days = fetched.data or []
+        open_dates = sorted(day.trade_date for day in days if day.is_open)
+        source_limit_bars, source_label = self._trade_calendar_probe_limits()
+        reference_open_dates = self.repository.list_open_trade_dates() or None
+        range_report = build_trade_calendar_range_report(
+            start,
+            end,
+            open_dates,
+            source_limit_bars=source_limit_bars,
+            source_label=source_label,
+            reference_open_dates=reference_open_dates,
+        )
+        if range_report.status != "pass":
+            return SyncResult(
+                dataset="trade_calendar",
+                status=SyncStatus.BLOCKED,
+                errors=[_trade_calendar_range_error(range_report, start, end)],
+                coverage_reports={"trade_calendar_range": range_report},
+            )
+        run_id = self.repository.begin_ingestion_run(
+            "trade_calendar",
+            {"start": start.isoformat(), "end": end.isoformat()},
+        )
+        rows = [
+            {
+                "exchange": day.exchange,
+                "trade_date": day.trade_date,
+                "is_open": day.is_open,
+                "available_at": day.available_at,
+                "source": day.source,
+            }
+            for day in days
+        ]
+        self.repository.upsert_staging_trade_calendar(run_id, rows)
+        self._save_snapshot(
+            "trade_cal",
+            {"start": start.isoformat(), "end": end.isoformat()},
+            [day.model_dump(mode="json") for day in days],
+        )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("trade_calendar")
+        return SyncResult(
+            dataset="trade_calendar",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"trade_calendar_range": range_report},
+        )
+
+    def sync_daily(self, trade_date: date) -> SyncResult:
+        probe = self._require_probe_dataset("daily_bars")
+        if probe is not None:
+            return probe
+        run_time = datetime.now(tz=SHANGHAI)
+        if self._requires_live_snapshot_date():
+            date_error = live_snapshot_date_error(trade_date, dataset="daily_bars")
+            if date_error:
+                return SyncResult(
+                    dataset="daily_bars",
+                    status=SyncStatus.BLOCKED,
+                    errors=[date_error],
+                )
+        fetched = self.provider.get_daily_by_trade_date(trade_date)
+        if not fetched.is_usable_for_screening:
+            return self._error_result("daily_bars", fetched)
+        bars = fetched.data or []
+        signal_available = post_close_signal_time(trade_date)
+        for bar in bars:
+            if run_time.date() == trade_date:
+                bar["available_at"] = max(signal_available, run_time)
+            else:
+                bar["available_at"] = signal_available
+            bar.setdefault("prev_close", bar.get("pre_close"))
+            bar.setdefault("ingested_at", run_time)
+        issues = assess_daily_bar_quality(bars)
+        if issues:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+        run_id = self.repository.begin_ingestion_run(
+            "daily_bars",
+            {"trade_date": trade_date.isoformat()},
+        )
+        self.repository.upsert_staging_daily_bars(run_id, bars)
+        self._save_snapshot("daily", {"trade_date": trade_date.isoformat()}, bars)
+        expected = self.repository.count_tradable_securities(
+            trade_date,
+            post_close_signal_time(trade_date),
+        )
+        numerator = len({bar["symbol"] for bar in bars})
+        coverage = build_daily_completeness_report(
+            numerator=numerator,
+            denominator=expected,
+            threshold=DAILY_COMPLETENESS_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            self.repository.mark_ingestion_failed(
+                run_id,
+                f"daily completeness {coverage.ratio:.4f} < {coverage.threshold}",
+            )
+            self.repository.record_quality_event(
+                dataset="daily_bars",
+                rule="daily_completeness",
+                severity="blocking",
+                numerator=coverage.numerator,
+                denominator=coverage.denominator,
+                detail_json=coverage.to_dict(),
+            )
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                run_id=run_id,
+                errors=[f"daily completeness below threshold: {coverage.ratio:.4f}"],
+                coverage_reports={"daily_completeness": coverage},
+            )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("daily_bars")
+        self.repository.record_quality_event(
+            dataset="daily_bars",
+            rule="daily_completeness",
+            severity="info",
+            version_id=version_id,
+            numerator=coverage.numerator,
+            denominator=coverage.denominator,
+            detail_json=coverage.to_dict(),
+        )
+        return SyncResult(
+            dataset="daily_bars",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"daily_completeness": coverage},
+        )
+
+    def sync_daily_indicators(self, trade_date: date) -> SyncResult:
+        blocked = self._require_open_trade_date(trade_date, "daily_indicators")
+        if blocked is not None:
+            return blocked
+
+        fetched = self.provider.get_daily_indicators(trade_date)
+        if fetched.status == DataStatus.NOT_AVAILABLE_YET:
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=fetched.errors or [fetched.status.value],
+            )
+        if fetched.status not in {DataStatus.OK, DataStatus.SUCCESS_EMPTY}:
+            return self._error_result("daily_indicators", fetched)
+
+        run_time = datetime.now(tz=SHANGHAI)
+        if fetched.status == DataStatus.SUCCESS_EMPTY and not (fetched.data or []):
+            if getattr(self.provider, "name", "") != "fixture":
+                return SyncResult(
+                    dataset="daily_indicators",
+                    status=SyncStatus.BLOCKED,
+                    errors=fetched.errors or [
+                        "SUCCESS_EMPTY requires fixture supplier confirmation; "
+                        "refusing to publish unverified empty indicators",
+                    ],
+                )
+            run_id = self.repository.begin_ingestion_run(
+                "daily_indicators",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "success_empty": True,
+                },
+            )
+            self._save_snapshot(
+                "daily_indicators",
+                {"trade_date": trade_date.isoformat()},
+                {"rows": [], "success_empty": True},
+            )
+            try:
+                version_id = self.repository.publish_dataset_version(run_id)
+            except ValueError as exc:
+                self.repository.mark_ingestion_failed(run_id, str(exc))
+                return SyncResult(
+                    dataset="daily_indicators",
+                    status=SyncStatus.ERROR,
+                    run_id=run_id,
+                    errors=[str(exc)],
+                )
+            published = self.repository.get_latest_published_version("daily_indicators")
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.PUBLISHED,
+                run_id=run_id,
+                version_id=version_id,
+                content_hash=published["content_hash"] if published else None,
+            )
+
+        rows = fetched.data or []
+        for row in rows:
+            row.setdefault("ingested_at", run_time)
+        issues = assess_daily_indicator_quality(rows, trade_date)
+        if issues:
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+
+        expected = self.repository.count_tradable_securities(
+            trade_date,
+            post_close_signal_time(trade_date),
+        )
+        coverage = build_daily_indicator_completeness_report(
+            numerator=len({row["symbol"] for row in rows}),
+            denominator=expected,
+            threshold=DAILY_INDICATOR_COMPLETENESS_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "daily indicator coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"daily_indicator_completeness": coverage},
+            )
+
+        run_id = self.repository.begin_ingestion_run(
+            "daily_indicators",
+            {"trade_date": trade_date.isoformat()},
+        )
+        self.repository.upsert_staging_daily_indicators(run_id, rows)
+        self._save_snapshot(
+            "daily_indicators",
+            {"trade_date": trade_date.isoformat()},
+            rows,
+        )
+        try:
+            version_id = self.repository.publish_dataset_version(run_id)
+        except ValueError as exc:
+            self.repository.mark_ingestion_failed(run_id, str(exc))
+            return SyncResult(
+                dataset="daily_indicators",
+                status=SyncStatus.ERROR,
+                run_id=run_id,
+                errors=[str(exc)],
+            )
+        published = self.repository.get_latest_published_version("daily_indicators")
+        self.repository.record_quality_event(
+            dataset="daily_indicators",
+            rule="daily_indicator_completeness",
+            severity="info",
+            version_id=version_id,
+            numerator=coverage.numerator,
+            denominator=coverage.denominator,
+            detail_json=coverage.to_dict(),
+        )
+        return SyncResult(
+            dataset="daily_indicators",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"daily_indicator_completeness": coverage},
+        )
+
+    def sync_market_open_snapshots(
+        self,
+        symbols: list[str],
+        trade_date: date,
+        observed_at: datetime,
+    ) -> SyncResult:
+        blocked = self._require_open_trade_date(trade_date, "market_open_snapshots")
+        if blocked is not None:
+            return blocked
+
+        cutoff = ensure_aware_shanghai(observed_at)
+        requested = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+        if not requested:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=["empty symbol list for market_open_snapshots"],
+            )
+
+        fetched = self.provider.get_market_open_snapshots(requested, trade_date, cutoff)
+        if fetched.status == DataStatus.NOT_AVAILABLE_YET:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=fetched.errors or [fetched.status.value],
+            )
+        if fetched.status not in {DataStatus.OK, DataStatus.SUCCESS_EMPTY}:
+            return self._error_result("market_open_snapshots", fetched)
+
+        run_time = datetime.now(tz=SHANGHAI)
+        if fetched.status == DataStatus.SUCCESS_EMPTY and not (fetched.data or []):
+            if getattr(self.provider, "name", "") != "fixture":
+                return SyncResult(
+                    dataset="market_open_snapshots",
+                    status=SyncStatus.BLOCKED,
+                    errors=fetched.errors or [
+                        "SUCCESS_EMPTY requires fixture supplier confirmation; "
+                        "refusing to publish unverified empty open snapshots",
+                    ],
+                )
+            run_id = self.repository.begin_ingestion_run(
+                "market_open_snapshots",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "observed_at": cutoff.isoformat(),
+                    "symbols": requested,
+                    "success_empty": True,
+                },
+            )
+            self._save_snapshot(
+                "market_open_snapshots",
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "observed_at": cutoff.isoformat(),
+                    "symbols": requested,
+                },
+                {"rows": [], "success_empty": True},
+            )
+            try:
+                version_id = self.repository.publish_dataset_version(run_id)
+            except ValueError as exc:
+                self.repository.mark_ingestion_failed(run_id, str(exc))
+                return SyncResult(
+                    dataset="market_open_snapshots",
+                    status=SyncStatus.ERROR,
+                    run_id=run_id,
+                    errors=[str(exc)],
+                )
+            published = self.repository.get_latest_published_version("market_open_snapshots")
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.PUBLISHED,
+                run_id=run_id,
+                version_id=version_id,
+                content_hash=published["content_hash"] if published else None,
+            )
+
+        rows = fetched.data or []
+        for row in rows:
+            row.setdefault("ingested_at", run_time)
+        issues = assess_market_open_snapshot_quality(
+            rows,
+            trade_date,
+            cutoff,
+            requested_symbols=requested,
+        )
+        if issues:
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+
+        run_id = self.repository.begin_ingestion_run(
+            "market_open_snapshots",
+            {
+                "trade_date": trade_date.isoformat(),
+                "observed_at": cutoff.isoformat(),
+                "symbols": requested,
+            },
+        )
+        self.repository.upsert_staging_market_open_snapshots(run_id, rows)
+        self._save_snapshot(
+            "market_open_snapshots",
+            {
+                "trade_date": trade_date.isoformat(),
+                "observed_at": cutoff.isoformat(),
+                "symbols": requested,
+            },
+            rows,
+        )
+        try:
+            version_id = self.repository.publish_dataset_version(run_id)
+        except ValueError as exc:
+            self.repository.mark_ingestion_failed(run_id, str(exc))
+            return SyncResult(
+                dataset="market_open_snapshots",
+                status=SyncStatus.ERROR,
+                run_id=run_id,
+                errors=[str(exc)],
+            )
+        published = self.repository.get_latest_published_version("market_open_snapshots")
+        return SyncResult(
+            dataset="market_open_snapshots",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+        )
+
+    def sync_daily_backfill(
+        self,
+        start: date,
+        end: date,
+        *,
+        symbols: list[str] | None = None,
+    ) -> SyncResult:
+        """Backfill historical daily bars via get_daily_bars (mootdx/sina path)."""
+        probe = self._require_probe_dataset("security_master")
+        if probe is not None:
+            return probe
+        if end < start:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[f"backfill end {end} before start {start}"],
+            )
+        run_time = datetime.now(tz=SHANGHAI)
+        target_symbols = symbols
+        if not target_symbols:
+            target_symbols = [
+                row.symbol
+                for row in self.repository.get_effective_securities_for_screening(
+                    end,
+                    post_close_signal_time(end),
+                )
+            ]
+        if not target_symbols:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=["no symbols available for daily backfill; sync security-master first"],
+            )
+        fetched = self.provider.get_daily_bars(target_symbols, start, end)
+        if not fetched.is_usable_for_screening:
+            return self._error_result("daily_bars", fetched)
+        bars = fetched.data or []
+        for bar in bars:
+            trade_date = bar["trade_date"]
+            signal_available = post_close_signal_time(trade_date)
+            bar["available_at"] = signal_available
+            bar.setdefault("prev_close", bar.get("pre_close"))
+            bar.setdefault("ingested_at", run_time)
+        if not bars:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=["daily backfill returned no bars"],
+            )
+        issues = assess_daily_bar_quality(bars)
+        if issues:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[issue.detail for issue in issues],
+            )
+        open_dates = [
+            day
+            for day in self.repository.list_open_trade_dates()
+            if start <= day <= end
+        ]
+        if not open_dates:
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[f"no open trade dates between {start} and {end}"],
+            )
+        backfill_threshold = (
+            BACKFILL_EXPLICIT_SYMBOLS_THRESHOLD
+            if symbols
+            else DAILY_COMPLETENESS_THRESHOLD
+        )
+        coverage = build_backfill_completeness_report(
+            bars,
+            target_symbols,
+            open_dates,
+            backfill_threshold,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="daily_bars",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "daily backfill coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"daily_backfill_completeness": coverage},
+            )
+        run_id = self.repository.begin_ingestion_run(
+            "daily_bars",
+            {
+                "mode": "backfill",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "symbol_count": len(target_symbols),
+            },
+        )
+        self.repository.upsert_staging_daily_bars(run_id, bars)
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("daily_bars")
+        return SyncResult(
+            dataset="daily_bars",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={"daily_backfill_completeness": coverage},
+        )
+
+    def sync_board_memberships(
+        self,
+        board_type: str,
+        board_code: str,
+        as_of: datetime,
+        *,
+        board_name: str | None = None,
+    ) -> SyncResult:
+        dataset_by_type = {
+            "industry": "industry_members",
+            "index": "index_members",
+            "concept": "concept_members",
+        }
+        dataset = dataset_by_type.get(board_type)
+        if dataset is None:
+            return SyncResult(
+                dataset="memberships",
+                status=SyncStatus.ERROR,
+                errors=[f"unsupported board_type {board_type}"],
+            )
+        probe = self._require_probe_dataset(dataset)
+        if probe is not None:
+            return probe
+        if board_type == "industry":
+            fetched = self.provider.get_industry_members(board_code, as_of)
+        elif board_type == "index":
+            fetched = self.provider.get_index_members(board_code, as_of)
+        elif board_type == "concept":
+            fetched = self.provider.get_concept_members(board_code, as_of)
+        else:
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.ERROR,
+                errors=[f"unsupported board_type {board_type}"],
+            )
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result(dataset, fetched)
+        memberships = fetched.data or []
+        self.repository.upsert_board_definitions([{
+            "board_type": board_type,
+            "board_code": board_code,
+            "name": board_name or board_code,
+            "pit_level": fetched.pit_level.value,
+            "source": fetched.source,
+            "available_at": fetched.available_at,
+        }])
+        rows = [
+            {
+                "board_type": item.board_type,
+                "board_code": item.board_code,
+                "symbol": item.symbol,
+                "membership_mode": item.membership_mode.value,
+                "effective_from": item.effective_from,
+                "effective_to": item.effective_to,
+                "snapshot_date": item.snapshot_date,
+                "available_at": item.available_at,
+                "source": item.source,
+            }
+            for item in memberships
+        ]
+        run_id = self.repository.begin_ingestion_run(
+            dataset,
+            {
+                "board_type": board_type,
+                "board_code": board_code,
+                "as_of": as_of.isoformat(),
+            },
+        )
+        self.repository.upsert_staging_board_memberships(run_id, rows)
+        self._save_snapshot(
+            dataset,
+            {"board_type": board_type, "board_code": board_code, "as_of": as_of.isoformat()},
+            [item.model_dump(mode="json") for item in memberships],
+        )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version(dataset)
+        return SyncResult(
+            dataset=dataset,
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={
+                "membership_count": CoverageReport(
+                    dataset=dataset,
+                    status="pass",
+                    numerator=len(rows),
+                    denominator=len(rows) or 1,
+                    threshold=0.0,
+                    ratio=1.0 if rows else 0.0,
+                ),
+            },
+        )
+
+    def sync_financials(
+        self,
+        as_of: datetime,
+        symbols: list[str] | None = None,
+    ) -> SyncResult:
+        probe = self._require_probe_dataset("financials")
+        if probe is not None:
+            return probe
+        target_symbols = symbols
+        if not target_symbols:
+            target_symbols = self.repository.list_effective_symbols(as_of.date(), as_of)
+        fetched = self.provider.get_financials(target_symbols, as_of)
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result("financials", fetched)
+        rows = fetched.data or []
+        if not rows:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    f"no financial records returned for {len(target_symbols)} symbols"
+                ],
+            )
+        open_dates = self.repository.list_open_trade_dates()
+        if not open_dates:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=["trade_calendar must be synced before financials"],
+            )
+        normalized = []
+        for row in rows:
+            item = normalize_financial_row(row, open_dates=open_dates)
+            if item["available_at"] <= as_of:
+                normalized.append(item)
+        if not normalized:
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    f"no financial records visible at {as_of.isoformat()} "
+                    f"for {len(target_symbols)} symbols"
+                ],
+            )
+        coverage = build_financial_symbol_coverage_report(
+            normalized,
+            target_symbols,
+            FINANCIAL_SYMBOL_COVERAGE_THRESHOLD,
+        )
+        if coverage.status != "pass":
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "financial symbol coverage below threshold: "
+                    f"{coverage.ratio:.4f} < {coverage.threshold}"
+                ],
+                coverage_reports={"financial_symbol_coverage": coverage},
+            )
+        field_quality = build_financial_field_quality_report(
+            normalized,
+            target_symbols,
+            FINANCIAL_FIELD_QUALITY_THRESHOLD,
+        )
+        if field_quality.status != "pass":
+            return SyncResult(
+                dataset="financials",
+                status=SyncStatus.BLOCKED,
+                errors=[
+                    "financial field quality below threshold: "
+                    f"{field_quality.ratio:.4f} < {field_quality.threshold}"
+                ],
+                coverage_reports={
+                    "financial_symbol_coverage": coverage,
+                    "financial_field_quality": field_quality,
+                },
+            )
+        run_id = self.repository.begin_ingestion_run(
+            "financials",
+            {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
+        )
+        self.repository.upsert_staging_financials(run_id, normalized)
+        self._save_snapshot(
+            "fina_indicator",
+            {"as_of": as_of.isoformat(), "symbol_count": len(target_symbols)},
+            normalized,
+        )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("financials")
+        return SyncResult(
+            dataset="financials",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={
+                "financial_symbol_coverage": coverage,
+                "financial_field_quality": field_quality,
+            },
+        )
+
+    def sync_adjustment_factors(
+        self,
+        symbols: list[str] | None = None,
+        *,
+        as_of: date | None = None,
+    ) -> SyncResult:
+        fetch = getattr(self.provider, "fetch_adjustment_factor_rows", None)
+        if fetch is None:
+            return SyncResult(
+                dataset="adjustment_factors",
+                status=SyncStatus.ERROR,
+                errors=["provider does not support adjustment_factors"],
+            )
+        target_date = as_of or date.today()
+        target_symbols = symbols
+        if not target_symbols:
+            signal_time = post_close_signal_time(target_date)
+            target_symbols = self.repository.list_effective_symbols(
+                target_date,
+                signal_time,
+            )
+        if not target_symbols:
+            return SyncResult(
+                dataset="adjustment_factors",
+                status=SyncStatus.ERROR,
+                errors=["no symbols available for adjustment factor sync"],
+            )
+        fetched = fetch(target_symbols, as_of=target_date)
+        if not fetched.is_usable_for_screening and not fetched.allows_empty_universe:
+            return self._error_result("adjustment_factors", fetched)
+        factor_rows, action_rows = fetched.data or ([], [])
+        run_id = self.repository.begin_ingestion_run(
+            "adjustment_factors",
+            {"as_of": target_date.isoformat(), "symbol_count": len(target_symbols)},
+        )
+        self.repository.upsert_staging_adjustment_factors(run_id, factor_rows)
+        if action_rows:
+            self.repository.upsert_staging_corporate_actions(run_id, action_rows)
+        self._save_snapshot(
+            "xdxr",
+            {"as_of": target_date.isoformat(), "symbol_count": len(target_symbols)},
+            {"factors": factor_rows, "actions": action_rows},
+        )
+        version_id = self.repository.publish_dataset_version(run_id)
+        published = self.repository.get_latest_published_version("adjustment_factors")
+        return SyncResult(
+            dataset="adjustment_factors",
+            status=SyncStatus.PUBLISHED,
+            run_id=run_id,
+            version_id=version_id,
+            content_hash=published["content_hash"] if published else None,
+            coverage_reports={
+                "adjustment_factors": CoverageReport(
+                    dataset="adjustment_factors",
+                    status="pass",
+                    numerator=len(factor_rows),
+                    denominator=len(factor_rows) or 1,
+                    threshold=0.0,
+                    ratio=1.0 if factor_rows else 0.0,
+                ),
+            },
+        )
+
+    def _require_probe_dataset(self, dataset: str) -> SyncResult | None:
+        probe = self.repository.get_capability_probe()
+        if probe is None:
+            auto = self.probe_capabilities()
+            probe = self.repository.get_capability_probe()
+            if probe is None:
+                return auto
+        entry = probe.get(dataset)
+        if entry is None:
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.ERROR,
+                errors=[f"capability probe missing dataset {dataset}"],
+            )
+        if not entry.get("permitted", False):
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.ERROR,
+                errors=[entry.get("error") or f"{dataset} not permitted"],
+            )
+        return None
+
+    def _error_result(self, dataset: str, fetched: DataResult[Any]) -> SyncResult:
+        return SyncResult(
+            dataset=dataset,
+            status=SyncStatus.ERROR,
+            errors=fetched.errors or [fetched.status.value],
+        )
+
+    def _require_open_trade_date(self, trade_date: date, dataset: str) -> SyncResult | None:
+        open_dates = self.repository.list_open_trade_dates()
+        if open_dates:
+            if trade_date not in open_dates:
+                return SyncResult(
+                    dataset=dataset,
+                    status=SyncStatus.BLOCKED,
+                    errors=[f"{trade_date.isoformat()} is not an open trade date"],
+                )
+            return None
+        if trade_date.weekday() >= 5:
+            return SyncResult(
+                dataset=dataset,
+                status=SyncStatus.BLOCKED,
+                errors=[f"{trade_date.isoformat()} is not a trading day"],
+            )
+        return None
+
+    def _save_snapshot(self, endpoint: str, params: dict[str, Any], payload: Any) -> None:
+        if self.repository.snapshot_dir is None:
+            return
+        self.repository.save_raw_snapshot(
+            source=self.provider.name,
+            endpoint=endpoint,
+            request_params=params,
+            response_body=_normalize_snapshot_payload(payload),
+        )
+
+
+def _normalize_snapshot_payload(payload: Any) -> Any:
+    if isinstance(payload, (date, datetime)):
+        return payload.isoformat()
+    if isinstance(payload, list):
+        return [_normalize_snapshot_payload(item) for item in payload]
+    if isinstance(payload, dict):
+        return {key: _normalize_snapshot_payload(value) for key, value in payload.items()}
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(mode="json")
+    return payload
